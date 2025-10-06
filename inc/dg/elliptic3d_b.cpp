@@ -64,6 +64,8 @@ std::function<void(const dg::x::DVec&, dg::x::DVec&)> create_solver(
         dg::IDMatrix global2local = dg::create::interpolation( xx_local,yy_local,zz_local,grid.global());
         dg::MDVec x_global{ xx, grid.communicator()};
         dg::MDVec chi_global = x_global;
+        // We need to do a warm-up so gpu cache is filled
+        dg::blas2::symv( local2global, w3d, y_global);
 
         // Every GPU will solve the global problem
         dg::Elliptic<dg::CartesianGrid3d, dg::DMatrix, dg::DVec> elliptic_global(

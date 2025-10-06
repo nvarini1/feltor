@@ -31,6 +31,10 @@ double vari(double x, double y, double)  { return pol(x,y,0)*pol(x,y,0)*(derX(x,
 
 
 std::function<void(const dg::x::DVec&, dg::x::DVec&)> create_solver(
+#ifdef WITH_MPI
+    unsigned u, // stage
+    double jfactor,
+#endif
     dg::x::CartesianGrid3d grid,
     unsigned& number, double eps, unsigned check_every,
     dg::Elliptic<dg::x::CartesianGrid3d,dg::x::DMatrix,dg::x::DVec>& elliptic
@@ -40,6 +44,47 @@ std::function<void(const dg::x::DVec&, dg::x::DVec&)> create_solver(
     unsigned max_iter = 10000;
     dg::x::DVec precond = elliptic.precond();
     dg::PCG<dg::x::DVec > pcg( w3d, max_iter);
+#ifdef WITH_MPI
+    if( u == 4)
+    {
+        int rank;
+        MPI_Comm_rank( MPI_COMM_WORLD, &rank);
+
+        auto xx = dg::evaluate( dg::cooX3d, grid.global());
+        auto yy = dg::evaluate( dg::cooY3d, grid.global());
+        auto zz = dg::evaluate( dg::cooZ3d, grid.global());
+        // Create all to all distribution of local points
+        dg::MIDMatrix local2global = dg::create::interpolation( xx,yy,zz, grid);
+        dg::MDVec y_global{ xx, grid.communicator()};
+
+        // Gather points back to origin
+        auto xx_local = dg::evaluate( dg::cooX3d, grid.local());
+        auto yy_local = dg::evaluate( dg::cooY3d, grid.local());
+        auto zz_local = dg::evaluate( dg::cooZ3d, grid.local());
+        dg::IDMatrix global2local = dg::create::interpolation( xx_local,yy_local,zz_local,grid.global());
+        dg::MDVec x_global{ xx, grid.communicator()};
+        dg::MDVec chi_global = x_global;
+
+        // Every GPU will solve the global problem
+        dg::Elliptic<dg::CartesianGrid3d, dg::DMatrix, dg::DVec> elliptic_global(
+            grid.global(), dg::forward, jfactor);
+        dg::DVec w3d_global = dg::create::weights( grid.global());
+        dg::PCG<dg::DVec> pcg_global( w3d_global, max_iter);
+
+        return [&, elliptic_global, local2global, global2local, x_global, y_global,
+            pcg_global, w3d_global, chi_global, eps, check_every](
+                const auto& y, auto& x) mutable
+        {
+            dg::blas2::symv( local2global, y, y_global);
+            dg::blas2::symv( local2global, x, x_global); // initial condition
+            dg::blas2::symv( local2global, elliptic.get_sigma(), chi_global);
+            elliptic_global.set_chi( chi_global.data());
+            number = pcg_global.solve( elliptic_global, x_global.data(), y_global.data(),
+                elliptic_global.precond(), w3d_global, eps, 1., check_every);
+            dg::blas2::symv( global2local, x_global.data(), x.data());
+        };
+    }
+#endif
     return [&, pcg, precond, w3d, eps, check_every]( const auto& y, auto& x) mutable
     {
         number = pcg.solve( elliptic, x, y, precond, w3d, eps, 1., check_every);
@@ -106,7 +151,11 @@ int main(
         multi_pol[u].construct( nested.grid(u), dg::forward, jfactor);
         multi_pol[u].set_chi( multi_chi[u]);
         multi_inv_pol[u] = [=, &numbers,
-            inverse = create_solver( nested.grid(u),
+            inverse = create_solver(
+#ifdef WITH_MPI
+            u, jfactor,
+#endif
+            nested.grid(u),
             numbers[u], eps[u], u == 0 ? 1 : 10, multi_pol[u])] (const auto& y, auto& x) mutable
         {
             dg::Timer t;

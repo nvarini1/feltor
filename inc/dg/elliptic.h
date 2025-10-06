@@ -143,6 +143,12 @@ class Elliptic1d
     }
 
     /**
+     * @brief Return the sclar part Chi
+     * @return chi
+     */
+    const Container& get_chi() const { return m_sigma;}
+
+    /**
      * @brief Return the weights making the operator self-adjoint
      * @return weights
      */
@@ -348,6 +354,19 @@ class Elliptic2d
     {
         m_chi = SparseTensor<Container>(tau);
     }
+
+    /**
+     * @brief Get tensor part of Chi tensor
+     *
+     * @return Tensor part of Chi tensor tau
+     */
+    const SparseTensor<Container>& get_tau() const { return m_chi;}
+    /**
+     * @brief Get sclar part of Chi tensor
+    *
+     * @return Scalar part of Chi tensor sigma
+     */
+    const Container& get_sigma() const { return m_sigma;}
 
     /**
      * @brief Return the weights making the operator self-adjoint
@@ -649,6 +668,11 @@ class Elliptic3d
     {
         m_chi = SparseTensor<Container>(tau);
     }
+    ///@copydoc Elliptic2d::get_tau()
+    const SparseTensor<Container>& get_tau() const { return m_chi;}
+    ///@copydoc Elliptic2d::get_sigma()
+    const Container& get_sigma() const { return m_sigma;}
+
 
     ///@copydoc Elliptic2d::weights()
     const Container& weights()const {

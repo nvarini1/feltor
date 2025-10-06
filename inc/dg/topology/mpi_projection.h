@@ -27,7 +27,7 @@ namespace dg
 @endcode
  * @tparam ConversionPolicy (can be one of the MPI %grids ) has to have the
  * members:
- *  - <tt>bool global2localIdx(unsigned,unsigned&,unsigned&) const;</tt> where
+ *  - <tt>bool global2localIdx(int,int&,int&) const;</tt> where
  *  the first parameter is the global index and the other two are the output
  *  pair (localIdx, rank).
    return true if successful, false if global index is not part of the grid
@@ -82,7 +82,6 @@ dg::MIHMatrix_t<real_type> make_mpi_matrix(
             global_row[i] = 1;
         }
     }
-
     // 2nd pass: distribute entries
     thrust::host_vector<std::array<int,2>> outer_col;
     thrust::host_vector<int> inner_row, inner_col, outer_row;
@@ -153,7 +152,7 @@ dg::MIHMatrix_t<real_type> make_mpi_matrix(
  * @endcode
  * @tparam ConversionPolicy (can be one of the MPI %grids ) has to have the
  * members:
- *  - <tt> bool global2localIdx(unsigned,unsigned&,unsigned&) const; </tt>
+ *  - <tt> bool global2localIdx(int,int&,int&) const; </tt>
  * where the first parameter is the global index and the other two are the
  * output pair (localIdx, rank).  return true if successful, false if global
  * index is not part of the grid
@@ -227,7 +226,7 @@ dg::IHMatrix_t<real_type> convertGlobal2LocalRows( const
  * @endcode
  * @tparam ConversionPolicy (can be one of the MPI %grids ) has to have the
  * members:
- *  - <tt>bool local2globalIdx(unsigned,unsigned&,unsigned&) const;</tt>
+ *  - <tt>bool local2globalIdx(int,int,int&) const;</tt>
  * where the first two parameters are the pair (localIdx, rank).
  * and the last one is the global index and the
    return true if successful, false if index is not part of the grid

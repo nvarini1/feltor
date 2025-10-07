@@ -67,19 +67,40 @@ std::function<void(const dg::x::DVec&, dg::x::DVec&)> create_solver(
 #ifdef WITH_MPI
     if( u == 4)
     {
-        int rank;
-        MPI_Comm_rank( MPI_COMM_WORLD, &rank);
+        int perp_rank, zsize;
+        MPI_Comm_size( grid.gz().communicator(), &zsize);
 	dg::Timer t;
 	t.tic();
 
         dg::IHMatrix local2global_tmp;
-        if(rank==0)
+	// Split communicator into z - comm and perpcomm (both 3d Cartesian)
+	int dims[] = {1,1,zsize};
+	int periods[] = {false,false,true};
+	MPI_Comm zcomm, perpcomm;
+	dg::mpi_cart_create( grid.gz().communicator(), 3, dims,  periods, 0, &zcomm);
+	dims[2] = 1;
+	periods[2] = true;
+	int coords[] = {0,0,0};
+	dg::mpi_cart_get( grid.perp_grid()->communicator(), 2, dims, periods, coords);
+	dg::mpi_cart_create( grid.perp_grid()->communicator(), 3, dims,  periods, 0, &perpcomm);
+        dg::x::CartesianGrid3d zglobal{ grid.x0(), grid.x1(),
+		           grid.y0(), grid.y1(),
+		           grid.z0(), grid.z1(),
+		           grid.n(), grid.Nx(), grid.Ny(), grid.Nz(), grid.bcx(), grid.bcy(), grid.bcz(),
+			   zcomm};
+        dg::x::CartesianGrid3d perpglobal{ grid.x0(), grid.x1(),
+		           grid.y0(), grid.y1(),
+		           grid.local().z0(), grid.local().z1(),
+		           grid.n(), grid.Nx(), grid.Ny(), grid.local().Nz(), grid.bcx(), grid.bcy(), grid.bcz(),
+			   perpcomm};
+        MPI_Comm_rank( perpcomm, &perp_rank);
+        if(perp_rank==0)
         {
-            auto xx = dg::evaluate( dg::cooX3d, grid.global());
-            auto yy = dg::evaluate( dg::cooY3d, grid.global());
-            auto zz = dg::evaluate( dg::cooZ3d, grid.global());
+            auto xx = dg::evaluate( dg::cooX3d, perpglobal.global());
+            auto yy = dg::evaluate( dg::cooY3d, perpglobal.global());
+            auto zz = dg::evaluate( dg::cooZ3d, perpglobal.global());
             // Create all to all distribution of local points
-            local2global_tmp = dg::create::interpolation( xx,yy,zz, grid.global());
+            local2global_tmp = dg::create::interpolation( xx,yy,zz, perpglobal.global());
 	}
 	else
         {
@@ -87,18 +108,21 @@ std::function<void(const dg::x::DVec&, dg::x::DVec&)> create_solver(
             auto yy = dg::HVec();
             auto zz = dg::HVec();
             // Create all to all distribution of local points
-            local2global_tmp = dg::create::interpolation( xx,yy,zz, grid.global());
+            local2global_tmp = dg::create::interpolation( xx,yy,zz, perpglobal.global());
 	}
+        dg::MDVec y_global( dg::DVec(perp_rank==0?perpglobal.global().size() : 0), perpcomm);
+
+        int rank;
+        MPI_Comm_rank( grid.communicator(), &rank);
 	t.toc();
 	if(rank==0)std::cout << "# Make local interpolation "<<t.diff()<<"\n";
 	t.tic();
-	dg::MIDMatrix local2global = dg::make_mpi_matrix( local2global_tmp, grid);
+	dg::MIDMatrix local2global = dg::make_mpi_matrix( local2global_tmp, perpglobal);
 	t.toc();
 	if(rank==0)std::cout << "# Make mpi interpolation "<<t.diff()<<"\n";
 	t.tic();
 
-        dg::MDVec y_global( dg::DVec(rank==0?grid.size() : 0), grid.communicator());
-	auto mat = dg::convertGlobal2LocalRows( local2global_tmp, grid);
+	auto mat = dg::convertGlobal2LocalRows( local2global_tmp, perpglobal);
 	t.toc();
 	if(rank==0)std::cout << "# Convert local 2 global rows "<<t.diff()<<"\n";
 	t.tic();
@@ -111,31 +135,45 @@ std::function<void(const dg::x::DVec&, dg::x::DVec&)> create_solver(
         dg::MDVec chi_global = x_global;
         // We need to do a warm-up so gpu cache is filled
 	dg::MDVec tmp(w3d);
-        dg::blas2::symv( local2global, w3d, y_global);
+	tmp.set_communicator( perpcomm);
+        dg::blas2::symv( local2global, tmp, y_global);
         dg::blas2::symv( global2local, y_global, tmp );
 	t.toc();
 	if(rank==0)std::cout << "# Warm up "<<t.diff()<<"\n";
 
-        // Every GPU will solve the global problem
-        dg::Elliptic<dg::CartesianGrid3d, dg::DMatrix, dg::DVec> elliptic_global(
-            grid.global(), dg::forward, jfactor);
-        dg::DVec w3d_global = dg::create::weights( grid.global());
-        dg::PCG<dg::DVec> pcg_global( w3d_global, max_iter);
+        dg::Elliptic<dg::x::CartesianGrid3d, dg::x::DMatrix, dg::x::DVec> elliptic_global(
+            zglobal, dg::forward, jfactor);
+        dg::x::DVec w3d_global = dg::create::weights( zglobal);
+        dg::PCG<dg::x::DVec> pcg_global( w3d_global, max_iter);
 
-        return [&, rank, elliptic_global, local2global, global2local, x_global, y_global,
+	MPI_Comm gridcomm = grid.communicator();
+        return [&, gridcomm, perpcomm, zcomm, perp_rank, elliptic_global, local2global, global2local, x_global, y_global,
             pcg_global, w3d_global, chi_global, eps, check_every](
                 const auto& y, auto& x) mutable
         {
-            dg::blas2::symv( local2global, y, y_global);
+		x.set_communicator(perpcomm);
             dg::blas2::symv( local2global, x, x_global); // initial condition
-            dg::blas2::symv( local2global, elliptic.get_sigma(), chi_global);
-            if( rank == 0) // only rank 0 solves
+		dg::blas1::copy( y, x);
+		x.set_communicator(perpcomm);
+            dg::blas2::symv( local2global, x, y_global);
+		dg::blas1::copy( elliptic.get_sigma(), x);
+		x.set_communicator(perpcomm);
+            dg::blas2::symv( local2global, x, chi_global);
+	    y_global.set_communicator( zcomm);
+	    x_global.set_communicator( zcomm);
+	    chi_global.set_communicator( zcomm);
+            if( perp_rank == 0) // only rank 0 solves
             {
-                elliptic_global.set_chi( chi_global.data());
-                number = pcg_global.solve( elliptic_global, x_global.data(), y_global.data(),
+                elliptic_global.set_chi( chi_global);
+                number = pcg_global.solve( elliptic_global, x_global, y_global,
                     elliptic_global.precond(), w3d_global, eps, 1., check_every);
             }
+	    y_global.set_communicator( perpcomm);
+	    x_global.set_communicator( perpcomm);
+	    chi_global.set_communicator( perpcomm);
+	    x.set_communicator( perpcomm);
             dg::blas2::symv( global2local, x_global, x);
+	    x.set_communicator( gridcomm);
         };
     }
 #endif

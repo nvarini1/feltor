@@ -65,7 +65,7 @@ std::function<void(const dg::x::DVec&, dg::x::DVec&)> create_solver(
     dg::x::DVec precond = elliptic.precond();
     dg::PCG<dg::x::DVec > pcg( w3d, max_iter);
 #ifdef WITH_MPI
-    if( u == 4)
+    if( u >= 3)
     {
         int perp_rank, zsize;
         MPI_Comm_size( grid.gz().communicator(), &zsize);

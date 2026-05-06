@@ -165,6 +165,8 @@ struct MPISparseBlockMat
     LocalMatrixInner& inner_matrix() {return m_i;}
     ///@brief Write access to the outer matrix
     LocalMatrixOuter& outer_matrix() {return m_o;}
+    ///@brief Read access to the communication object
+    const MPIKroneckerGather<Vector>& mpi_gather() const{return m_g;}
 
     MPI_Comm communicator() const { return m_g.communicator();}
 

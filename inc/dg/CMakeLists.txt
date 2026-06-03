@@ -348,6 +348,18 @@ if( FELTOR_WITH_NVSHMEM)
         list( APPEND _nvshmem_hints "$ENV{NVSHMEM_HOME}")
     endif()
     if( DEFINED ENV{NVHPC_HOME} AND NOT "$ENV{NVHPC_HOME}" STREQUAL "")
+        # nvhpc ships one nvshmem per CUDA version under comm_libs/<major>.<minor>.
+        # NVSHMEM and cudart MUST come from the same CUDA version: a 12.9 nvshmem
+        # links cudaGetDeviceProperties_v2, which a 13.0 cudart no longer exports.
+        # So prefer the comm_libs dir matching the CUDAToolkit we actually link
+        # (found in the top-level CMakeLists) before falling back to a wildcard --
+        # the wildcard alone sorts "12.9" before "13.0" and would mis-match.
+        if( DEFINED CUDAToolkit_VERSION_MAJOR AND DEFINED CUDAToolkit_VERSION_MINOR)
+            file( GLOB _nvhpc_nvshmem_match
+                "$ENV{NVHPC_HOME}/comm_libs/${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}/nvshmem"
+                "$ENV{NVHPC_HOME}/*/*/comm_libs/${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}/nvshmem")
+            list( APPEND _nvshmem_hints ${_nvhpc_nvshmem_match})
+        endif()
         file( GLOB _nvhpc_nvshmem
             "$ENV{NVHPC_HOME}/comm_libs/nvshmem"
             "$ENV{NVHPC_HOME}/comm_libs/*/nvshmem"
@@ -390,8 +402,14 @@ if( FELTOR_WITH_NVSHMEM)
     # nvshmem_host: CPU-side API; nvshmem_device (libnvshmem.a): init/finalize +
     # device runtime, device-linked; CUDA::cudart: runtime API that libnvshmem.a
     # depends on (cudaGetDeviceProperties_v2 etc.); cuda: driver API.
+    # libnvshmem.a is a static archive that references cudart symbols, so cudart
+    # must be resolvable *after* it.  Wrap both in --start-group/--end-group so
+    # the linker iterates until the cross-references are satisfied, independent
+    # of the order CMake emits them in.
     target_link_libraries( nvshmem_feltor INTERFACE
-        "${NVSHMEM_HOST_LIBRARY}" nvshmem_device CUDA::cudart "-lcuda")
+        "${NVSHMEM_HOST_LIBRARY}"
+        "-Wl,--start-group" nvshmem_device CUDA::cudart "-Wl,--end-group"
+        "-lcuda")
 
     # Required so nvcc compiles consumers with -rdc=true and runs the device-link
     # that resolves libnvshmem.a's __cudaRegisterLinkedBinary.  Set as a directory

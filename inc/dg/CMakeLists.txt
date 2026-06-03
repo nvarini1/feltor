@@ -373,25 +373,31 @@ if( FELTOR_WITH_NVSHMEM)
     endif()
     message( STATUS "Found NVSHMEM host lib: ${NVSHMEM_HOST_LIBRARY}")
 
+    # Even host-only programs must link the static device archive: on the
+    # nvhpc-bundled NVSHMEM the init/finalize entry points (nvshmemi_init_thread,
+    # nvshmemi_finalize) are defined ONLY in libnvshmem.a, not in
+    # libnvshmem_host.so.  libnvshmem.a is relocatable device code, so its
+    # __cudaRegisterLinkedBinary symbol requires a CUDA device-link (nvcc -dlink)
+    # which CMake performs only for targets with CUDA_SEPARABLE_COMPILATION ON --
+    # hence the global setting below.  Wrap the archive as an IMPORTED STATIC
+    # target so CMake includes it in the device-link step.
+    add_library( nvshmem_device STATIC IMPORTED)
+    set_target_properties( nvshmem_device PROPERTIES
+        IMPORTED_LOCATION "${NVSHMEM_DEVICE_LIBRARY}")
+
     add_library( nvshmem_feltor INTERFACE)
     target_include_directories( nvshmem_feltor INTERFACE "${NVSHMEM_INCLUDE_DIR}")
-    # Link the host library only.  feltor uses the host-side NVSHMEM API
-    # (init/malloc/putmem-on-stream/barrier-on-stream); the static device
-    # library (libnvshmem.a / NVSHMEM_DEVICE_LIBRARY) is relocatable device
-    # code whose __cudaRegisterLinkedBinary symbol needs a separate nvcc -dlink
-    # step (CUDA_SEPARABLE_COMPILATION) -> undefined-reference at link if pulled
-    # in here.  We still locate it above so that, if device-side NVSHMEM is ever
-    # used, it can be device-linked from a target with separable compilation on.
+    # nvshmem_host: CPU-side API; nvshmem_device (libnvshmem.a): init/finalize +
+    # device runtime, device-linked; cuda: driver.
     target_link_libraries( nvshmem_feltor INTERFACE
-        "${NVSHMEM_HOST_LIBRARY}" "-lcuda")
-    # NOTE: no --relocatable-device-code here.  feltor's NVSHMEM usage is the
-    # host-side stream API (nvshmemx_*_on_stream); it never calls NVSHMEM device
-    # functions from kernels, so RDC is not required.  Forcing -rdc=true makes
-    # nvcc emit a __cudaRegisterLinkedBinary symbol that only a separate device
-    # link (nvcc -dlink) resolves, which CMake skips unless the target sets
-    # CUDA_SEPARABLE_COMPILATION -> undefined-reference at link.  If device-side
-    # NVSHMEM is ever used, set CUDA_SEPARABLE_COMPILATION ON on those targets
-    # and device-link against libnvshmem_device instead.
+        "${NVSHMEM_HOST_LIBRARY}" nvshmem_device "-lcuda")
+
+    # Required so nvcc compiles consumers with -rdc=true and runs the device-link
+    # that resolves libnvshmem.a's __cudaRegisterLinkedBinary.  Set as a directory
+    # variable here (before the benchmark/test targets are created below) so those
+    # targets pick it up.  Only the NVSHMEM build tree configures this block.
+    set( CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+
     # Propagate definition and link to all consumers of dg_dg
     target_compile_definitions( dg_dg INTERFACE DG_WITH_NVSHMEM)
     if( FELTOR_WITH_MPI)

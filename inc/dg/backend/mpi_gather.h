@@ -10,13 +10,12 @@
 #include "tensor_traits.h"
 #include "memory.h"
 #include "index.h"
-#ifdef DG_WITH_NCCL
-#include "nccl.h"
-#endif // DG_WITH_NCCL
 #ifdef DG_WITH_NVSHMEM
 #include <nvshmem.h>
 #include <nvshmemx.h>
 #endif // DG_WITH_NVSHMEM
+#ifdef DG_WITH_NCCL
+#include "nccl.h"
 ///@cond
 namespace dg
 {

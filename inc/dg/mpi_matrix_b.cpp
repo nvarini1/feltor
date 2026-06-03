@@ -136,9 +136,9 @@ int main(int argc, char* argv[])
     };
 
     dg::x::DMatrix Dx, Dy, Dz;
-    dg::blas2::transfer(dg::create::dx(grid, dg::centered), Dx);
-    dg::blas2::transfer(dg::create::dy(grid, dg::centered), Dy);
-    dg::blas2::transfer(dg::create::dz(grid, dg::centered), Dz);
+    dg::blas2::transfer(dg::create::derivative(0, grid, dg::PER, dg::centered), Dx);
+    dg::blas2::transfer(dg::create::derivative(1, grid, dg::PER, dg::centered), Dy);
+    dg::blas2::transfer(dg::create::derivative(2, grid, dg::PER, dg::centered), Dz);
 
     benchmark("dx centered", Dx);
     benchmark("dy centered", Dy);

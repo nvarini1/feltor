@@ -15,7 +15,7 @@ dg::bc bcx = dg::DIR;
 dg::bc bcy = dg::PER;
 
 double initial( double, double) {return 0.;}
-double amp = 0.9999;
+double amp = 0.9;
 double pol( double x, double y) {return 1. + amp*sin(x)*sin(y); } //must be strictly positive
 //double pol( double x, double y) {return 1.; }
 //double pol( double x, double y) {return 1. + sin(x)*sin(y) + x; } //must be strictly positive
@@ -61,7 +61,7 @@ int main()
     //std::cin >> stages >> jfactor;
     //std::cout << stages << " "<<jfactor<<std::endl;
     std::cout << "Type nu1 (20), nu2 (20) gamma (1) \n";
-    unsigned nu1, nu2, gamma;
+    unsigned nu1 = 20, nu2 = 20, gamma = 1;
     std::cin >> nu1 >> nu2 >> gamma;
     std::cout << nu1 << " "<<nu2<<" "<<gamma<<std::endl;
     dg::NestedGrids<dg::aGeometry2d, dg::DMatrix, dg::DVec> nested( grid, stages);

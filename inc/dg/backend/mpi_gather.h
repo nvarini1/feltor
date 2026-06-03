@@ -12,6 +12,11 @@
 #include "index.h"
 #ifdef DG_WITH_NCCL
 #include "nccl.h"
+#endif // DG_WITH_NCCL
+#ifdef DG_WITH_NVSHMEM
+#include <nvshmem.h>
+#include <nvshmemx.h>
+#endif // DG_WITH_NVSHMEM
 ///@cond
 namespace dg
 {
@@ -394,6 +399,9 @@ struct MPIContiguousGather
         for( auto& chunk : chunks.second)
             m_gatherFrom_minSize = std::max( m_gatherFrom_minSize,
                 (unsigned)(chunk.idx+chunk.size));
+#ifdef DG_WITH_NVSHMEM
+        init_nvshmem_offsets();
+#endif
     }
 
     /// Concatenate neigboring indices to bulk messasge
@@ -443,7 +451,10 @@ struct MPIContiguousGather
         if constexpr (dg::has_policy_v<ContainerType0, dg::CudaTag>)
         {
             detail::cuda_check_error_and_sync_device();
-            if constexpr ( dg::nccl_mpi)
+            if constexpr ( dg::nvshmem_mpi)
+                nvshmem_global_gather_init( gatherFrom, buffer,
+                    self_communication, rank);
+            else if constexpr ( dg::nccl_mpi)
                 nccl_global_gather_init( gatherFrom, buffer,
                     self_communication, rank, m_recvMsg, m_sendMsg);
             else if constexpr ( dg::cuda_aware_mpi)
@@ -465,7 +476,21 @@ struct MPIContiguousGather
         using value_type = dg::get_value_type<ContainerType>;
         if constexpr (dg::has_policy_v<ContainerType, dg::CudaTag>)
         {
-            if constexpr ( dg::nccl_mpi)
+            if constexpr ( dg::nvshmem_mpi)
+            {
+#ifdef DG_WITH_NVSHMEM
+                // Barrier on the NVSHMEM stream: ensures all remote PUTs have landed
+                nvshmemx_barrier_all_on_stream( m_nvshmem_stream);
+                // Let the default stream wait for the barrier before reading the buffer
+                cudaEventRecord( m_nvshmem_event, m_nvshmem_stream);
+                cudaStreamWaitEvent( cudaStreamDefault, m_nvshmem_event, 0);
+                // Copy received data from symmetric heap to the caller's device buffer
+                cudaMemcpyAsync( thrust::raw_pointer_cast( buffer.data()),
+                    m_nvshmem_recv, buffer.size() * sizeof(value_type),
+                    cudaMemcpyDeviceToDevice, cudaStreamDefault);
+#endif // DG_WITH_NVSHMEM
+            }
+            else if constexpr ( dg::nccl_mpi)
             {
 #ifdef DG_WITH_NCCL
     // Make sure all Send/Recv Kernels are actually issued to the stream
@@ -654,6 +679,117 @@ struct MPIContiguousGather
 #endif // __CUDACC__
 
     }
+#ifdef DG_WITH_NVSHMEM
+    // At construction: exchange recv-buffer offsets so each sender knows
+    // where in the remote symmetric buffer to PUT its chunks.
+    // Self-entries (pid == rank) are stored locally without MPI exchange.
+    void init_nvshmem_offsets()
+    {
+        int rank;
+        MPI_Comm_rank( m_comm, &rank);
+        // Step 1: compute recv-buffer start offset for every (pid, chunk_u) in
+        // m_recvMsg, including self.  This covers both self_communication=true
+        // and self_communication=false call sites.
+        std::map<int, std::vector<unsigned>> my_recv_starts;
+        unsigned start = 0;
+        for( auto& [pid, chunks] : m_recvMsg)
+        for( unsigned u = 0; u < chunks.size(); u++)
+        {
+            my_recv_starts[pid].push_back( start);
+            start += chunks[u].size;
+        }
+        // Step 2: tell each non-self sender the offsets at which we will store
+        // their messages; receive from each non-self receiver the offsets at
+        // which they will store our messages.
+        std::vector<MPI_Request> reqs;
+        for( auto& [pid, starts] : my_recv_starts)
+        {
+            if( pid == rank || starts.empty()) continue;
+            reqs.emplace_back();
+            MPI_Isend( starts.data(), starts.size(), MPI_UNSIGNED,
+                       pid, 0xFE01, m_comm, &reqs.back());
+        }
+        for( auto& [pid, chunks] : m_sendMsg)
+        {
+            if( pid == rank || chunks.empty()) continue;
+            m_nvshmem_send_offsets[pid].resize( chunks.size());
+            reqs.emplace_back();
+            MPI_Irecv( m_nvshmem_send_offsets[pid].data(), chunks.size(), MPI_UNSIGNED,
+                       pid, 0xFE01, m_comm, &reqs.back());
+        }
+        if( !reqs.empty())
+            MPI_Waitall( reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+        // Self: copy our own recv_starts directly (no network needed)
+        if( my_recv_starts.count( rank))
+            m_nvshmem_send_offsets[rank] = my_recv_starts[rank];
+        // Step 3: resolve each non-self comm-rank to its NVSHMEM PE (= world rank)
+        MPI_Group world_grp, comm_grp;
+        MPI_Comm_group( MPI_COMM_WORLD, &world_grp);
+        MPI_Comm_group( m_comm, &comm_grp);
+        for( auto& [pid, chunks] : m_sendMsg)
+        {
+            if( pid == rank || chunks.empty()) continue;
+            int pid_copy = pid, world_rank;
+            MPI_Group_translate_ranks( comm_grp, 1, &pid_copy, world_grp, &world_rank);
+            m_nvshmem_send_pes[pid] = world_rank;
+        }
+        MPI_Group_free( &world_grp);
+        MPI_Group_free( &comm_grp);
+    }
+    template<class ContainerType0, class ContainerType1>
+    void nvshmem_global_gather_init( const ContainerType0& gatherFrom,
+        ContainerType1& buffer, bool self_communication, int rank) const
+    {
+        using value_type = dg::get_value_type<ContainerType0>;
+        // Lazy creation of CUDA resources (safe: only used after construction)
+        if( !m_nvshmem_stream)
+        {
+            cudaStreamCreate( &m_nvshmem_stream);
+            cudaEventCreateWithFlags( &m_nvshmem_event, cudaEventDisableTiming);
+        }
+        // Grow symmetric recv buffer if needed (all PEs allocate the same size)
+        size_t needed = buffer.size() * sizeof(value_type);
+        if( m_nvshmem_alloc_bytes < needed)
+        {
+            if( m_nvshmem_recv) nvshmem_free( m_nvshmem_recv);
+            m_nvshmem_recv = nvshmem_malloc( needed);
+            m_nvshmem_alloc_bytes = needed;
+        }
+        value_type* sym_recv = static_cast<value_type*>( m_nvshmem_recv);
+        // Post operations: for each send target, write chunks into its recv buffer.
+        // Remote peers use NVSHMEM PUT; self uses a local D2D copy on the same stream.
+        for( auto& [pid, chunks] : m_sendMsg)
+        {
+            if( pid == rank && !self_communication) continue;
+            for( unsigned u = 0; u < chunks.size(); u++)
+            {
+                const value_type* src =
+                    thrust::raw_pointer_cast( gatherFrom.data()) + chunks[u].idx;
+                unsigned off = m_nvshmem_send_offsets.at( pid)[u];
+                if( pid == rank)
+                {
+                    cudaMemcpyAsync( sym_recv + off, src,
+                        chunks[u].size * sizeof(value_type),
+                        cudaMemcpyDeviceToDevice, m_nvshmem_stream);
+                }
+                else
+                {
+                    int pe = m_nvshmem_send_pes.at( pid);
+                    nvshmemx_putmem_on_stream( sym_recv + off, src,
+                        chunks[u].size * sizeof(value_type), pe, m_nvshmem_stream);
+                }
+            }
+        }
+    }
+    // recv offsets negotiated at construction (non-mutable: set once, read-only thereafter)
+    std::map<int, std::vector<unsigned>> m_nvshmem_send_offsets; // [pid][u] = offset in pid's buffer
+    std::map<int, int> m_nvshmem_send_pes;                       // [pid] = NVSHMEM PE (world rank)
+    // lazily-allocated runtime resources (mutable: created on first use)
+    mutable void* m_nvshmem_recv = nullptr;
+    mutable size_t m_nvshmem_alloc_bytes = 0;
+    mutable cudaStream_t m_nvshmem_stream = nullptr;
+    mutable cudaEvent_t m_nvshmem_event = nullptr;
+#endif // DG_WITH_NVSHMEM
 
 };
 }//namespace detail

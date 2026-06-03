@@ -330,6 +330,68 @@ endif()
 if( FELTOR_CUDA_UNAWARE_MPI)
     target_compile_definitions( dg_dg INTERFACE DG_CUDA_UNAWARE_MPI)
 endif()
+# NVSHMEM support: enables the production NVSHMEM halo-exchange path in symv
+# as well as the mpi_matrix_nvshmem_b benchmark.
+# Requires NVSHMEM_HOME to be set in the environment.
+# Usage: cmake -DFELTOR_WITH_NVSHMEM=ON ...
+option( FELTOR_WITH_NVSHMEM "Enable NVSHMEM-backed halo exchange in symv" OFF)
+if( FELTOR_WITH_NVSHMEM)
+    # Locate the nvshmem install.  Search order:
+    #   1. an explicit NVSHMEM_HOME (standalone nvshmem installs)
+    #   2. the nvshmem bundled with nvhpc, which sets NVHPC_HOME; the libraries
+    #      live under $NVHPC_HOME/comm_libs/<cudaver>/nvshmem (or a version-less
+    #      comm_libs/nvshmem symlink).
+    # The CMake link step runs nvcc as a separate command that does NOT inherit
+    # nvcc's implicit nvshmem search path, so we resolve absolute paths here.
+    set( _nvshmem_hints "")
+    if( DEFINED ENV{NVSHMEM_HOME} AND NOT "$ENV{NVSHMEM_HOME}" STREQUAL "")
+        list( APPEND _nvshmem_hints "$ENV{NVSHMEM_HOME}")
+    endif()
+    if( DEFINED ENV{NVHPC_HOME} AND NOT "$ENV{NVHPC_HOME}" STREQUAL "")
+        file( GLOB _nvhpc_nvshmem
+            "$ENV{NVHPC_HOME}/comm_libs/nvshmem"
+            "$ENV{NVHPC_HOME}/comm_libs/*/nvshmem"
+            "$ENV{NVHPC_HOME}/*/*/comm_libs/nvshmem"
+            "$ENV{NVHPC_HOME}/*/*/comm_libs/*/nvshmem")
+        list( APPEND _nvshmem_hints ${_nvhpc_nvshmem})
+    endif()
+
+    find_path(    NVSHMEM_INCLUDE_DIR    nvshmem.h     HINTS ${_nvshmem_hints} PATH_SUFFIXES include)
+    find_library( NVSHMEM_HOST_LIBRARY   nvshmem_host  HINTS ${_nvshmem_hints} PATH_SUFFIXES lib lib64)
+    find_library( NVSHMEM_DEVICE_LIBRARY nvshmem       HINTS ${_nvshmem_hints} PATH_SUFFIXES lib lib64)
+
+    if( NOT NVSHMEM_INCLUDE_DIR OR NOT NVSHMEM_HOST_LIBRARY OR NOT NVSHMEM_DEVICE_LIBRARY)
+        message( FATAL_ERROR
+            "FELTOR_WITH_NVSHMEM=ON but nvshmem could not be located.\n"
+            "Load an nvhpc module (which sets NVHPC_HOME, bundling nvshmem under\n"
+            "$NVHPC_HOME/comm_libs/<cudaver>/nvshmem), or set NVSHMEM_HOME to a\n"
+            "standalone install root containing include/ and lib/.\n"
+            "  NVHPC_HOME            = $ENV{NVHPC_HOME}\n"
+            "  NVSHMEM_INCLUDE_DIR   = ${NVSHMEM_INCLUDE_DIR}\n"
+            "  NVSHMEM_HOST_LIBRARY  = ${NVSHMEM_HOST_LIBRARY}\n"
+            "  NVSHMEM_DEVICE_LIBRARY= ${NVSHMEM_DEVICE_LIBRARY}")
+    endif()
+    message( STATUS "Found NVSHMEM host lib: ${NVSHMEM_HOST_LIBRARY}")
+
+    add_library( nvshmem_feltor INTERFACE)
+    target_include_directories( nvshmem_feltor INTERFACE "${NVSHMEM_INCLUDE_DIR}")
+    # nvshmem_host: CPU-side bootstrap; nvshmem: GPU-side runtime; cuda: driver
+    target_link_libraries( nvshmem_feltor INTERFACE
+        "${NVSHMEM_HOST_LIBRARY}" "${NVSHMEM_DEVICE_LIBRARY}" "-lcuda")
+    # NOTE: no --relocatable-device-code here.  feltor's NVSHMEM usage is the
+    # host-side stream API (nvshmemx_*_on_stream); it never calls NVSHMEM device
+    # functions from kernels, so RDC is not required.  Forcing -rdc=true makes
+    # nvcc emit a __cudaRegisterLinkedBinary symbol that only a separate device
+    # link (nvcc -dlink) resolves, which CMake skips unless the target sets
+    # CUDA_SEPARABLE_COMPILATION -> undefined-reference at link.  If device-side
+    # NVSHMEM is ever used, set CUDA_SEPARABLE_COMPILATION ON on those targets
+    # and device-link against libnvshmem_device instead.
+    # Propagate definition and link to all consumers of dg_dg
+    target_compile_definitions( dg_dg INTERFACE DG_WITH_NVSHMEM)
+    if( FELTOR_WITH_MPI)
+        target_link_libraries( dg_dg INTERFACE nvshmem_feltor)
+    endif()
+endif()
 
 
 # MW: cccl already links OpenMP
@@ -379,6 +441,9 @@ if(FELTOR_BUILD_BENCHMARKS)
     foreach(benchmark_path IN LISTS DG_BENCHMARKS)
         add_dg_benchmark("${benchmark_path}" "" ${FELTOR_WITH_MPI} target_name )
     endforeach()
+    # NVSHMEM is exercised through mpi_matrix_b (already in DG_BENCHMARKS): when
+    # FELTOR_WITH_NVSHMEM=ON the production symv path dispatches to NVSHMEM via
+    # DG_WITH_NVSHMEM, so no separate benchmark source is required.
 endif()
 
 # ============================================

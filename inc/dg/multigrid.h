@@ -202,21 +202,45 @@ void nested_iterations(
     // compute residual r = b - A x
     dg::apply(ops[0], x, nested.r(0));
     dg::blas1::axpby(1., b, -1., nested.r(0));
+    try{
+        dg::blas1::dot( nested.r(0), nested.r(0));
+    }catch( dg::Error& err){
+        err.append_line( dg::Message(_ping_)<<"NaN/Inf in initial residual r(0)");
+        throw;
+    }
     // project residual down to coarse grid
     dg::blas1::copy( x, nested.x(0));
     for( unsigned u=0; u<nested.stages()-1; u++)
     {
         dg::blas2::gemv( nested.projection(u), nested.r(u), nested.r(u+1));
+        try{
+            dg::blas1::dot( nested.r(u+1), nested.r(u+1));
+        }catch( dg::Error& err){
+            err.append_line( dg::Message(_ping_)<<"NaN/Inf in r("<<u+1<<") after projection from stage "<<u);
+            throw;
+        }
         dg::blas2::gemv( nested.projection(u), nested.x(u), nested.x(u+1));
         // compute FAS right hand side
         dg::blas2::symv( ops[u+1], nested.x(u+1), nested.b(u+1));
         dg::blas1::axpby( 1., nested.b(u+1), 1., nested.r(u+1), nested.b(u+1));
+        try{
+            dg::blas1::dot( nested.b(u+1), nested.b(u+1));
+        }catch( dg::Error& err){
+            err.append_line( dg::Message(_ping_)<<"NaN/Inf in b("<<u+1<<") after RHS assembly at stage "<<u+1);
+            throw;
+        }
         dg::blas1::copy( nested.x(u+1), nested.w(u+1)); // remember x0
     }
 
     //now solve residual equations
     for( unsigned u=nested.stages()-1; u>0; u--)
     {
+        try{
+            dg::blas1::dot( nested.b(u), nested.b(u));
+        }catch( dg::Error& err){
+            err.append_line( dg::Message(_ping_)<<"NaN/Inf in RHS at stage "<<u<<" of nested iterations (before solve)");
+            throw;
+        }
         try{
             dg::apply( inverse_ops[u],  nested.b(u), nested.x(u));
         }catch( dg::Error& err){
@@ -228,6 +252,12 @@ void nested_iterations(
         // update x
         dg::blas2::symv( 1., nested.interpolation(u-1), nested.x(u), 1.,
                 nested.x(u-1));
+        try{
+            dg::blas1::dot( nested.x(u-1), nested.x(u-1));
+        }catch( dg::Error& err){
+            err.append_line( dg::Message(_ping_)<<"NaN/Inf in x("<<u-1<<") after interpolation from stage "<<u);
+            throw;
+        }
     }
     //update initial guess
     dg::blas1::copy( nested.x(0), x);

@@ -39,19 +39,28 @@
 #endif //THRUST_DEVICE_SYSTEM
 
 
-//%%%%%%%%%%%%%%%try to check for cuda-aware MPI support or NCCL%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%%%%%%%%%%%%%%%try to check for cuda-aware MPI support or NCCL/NVSHMEM%%%%%%%%%%%%%%%%%%%
 //TODO This should be tested somewhere
 namespace dg{
 #ifdef MPI_VERSION
 #if THRUST_DEVICE_SYSTEM==THRUST_DEVICE_SYSTEM_CUDA // cuda is involved
 //{;
 
-#ifdef DG_WITH_NCCL
-inline constexpr bool nccl_mpi = true;
+#ifdef DG_WITH_NVSHMEM
+// NVSHMEM handles point-to-point halo exchange; CUDA-aware MPI is still used
+// for collective operations (allreduce).  nccl_mpi is false.
+inline constexpr bool nvshmem_mpi = true;
+inline constexpr bool nccl_mpi    = false;
+inline constexpr bool cuda_aware_mpi = true; // needed for allreduce
+#pragma message( "NVSHMEM MPI support enabled!")
+#elif defined(DG_WITH_NCCL)
+inline constexpr bool nvshmem_mpi    = false;
+inline constexpr bool nccl_mpi       = true;
 inline constexpr bool cuda_aware_mpi = false;
 #pragma message( "NCCL MPI support enabled!")
 #else
-inline constexpr bool nccl_mpi = false;
+inline constexpr bool nvshmem_mpi = false;
+inline constexpr bool nccl_mpi    = false;
 //{
 #ifdef DG_CUDA_UNAWARE_MPI
 //{;
@@ -81,12 +90,13 @@ inline constexpr bool cuda_aware_mpi = true;
 //}
 #endif // DG_CUDA_UNAWARE_MPI
 //}
-#endif // DG_WITH_NCCL
+#endif // DG_WITH_NVSHMEM / DG_WITH_NCCL
 //}
 #else // THRUST != CUDA
 //{;
 inline constexpr bool cuda_aware_mpi = false;
-inline constexpr bool nccl_mpi = false;
+inline constexpr bool nccl_mpi       = false;
+inline constexpr bool nvshmem_mpi    = false;
 //}
 #endif //THRUST == CUDA
 #endif //MPI_VERSION

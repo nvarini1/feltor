@@ -375,9 +375,15 @@ if( FELTOR_WITH_NVSHMEM)
 
     add_library( nvshmem_feltor INTERFACE)
     target_include_directories( nvshmem_feltor INTERFACE "${NVSHMEM_INCLUDE_DIR}")
-    # nvshmem_host: CPU-side bootstrap; nvshmem: GPU-side runtime; cuda: driver
+    # Link the host library only.  feltor uses the host-side NVSHMEM API
+    # (init/malloc/putmem-on-stream/barrier-on-stream); the static device
+    # library (libnvshmem.a / NVSHMEM_DEVICE_LIBRARY) is relocatable device
+    # code whose __cudaRegisterLinkedBinary symbol needs a separate nvcc -dlink
+    # step (CUDA_SEPARABLE_COMPILATION) -> undefined-reference at link if pulled
+    # in here.  We still locate it above so that, if device-side NVSHMEM is ever
+    # used, it can be device-linked from a target with separable compilation on.
     target_link_libraries( nvshmem_feltor INTERFACE
-        "${NVSHMEM_HOST_LIBRARY}" "${NVSHMEM_DEVICE_LIBRARY}" "-lcuda")
+        "${NVSHMEM_HOST_LIBRARY}" "-lcuda")
     # NOTE: no --relocatable-device-code here.  feltor's NVSHMEM usage is the
     # host-side stream API (nvshmemx_*_on_stream); it never calls NVSHMEM device
     # functions from kernels, so RDC is not required.  Forcing -rdc=true makes

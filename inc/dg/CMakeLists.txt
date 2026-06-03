@@ -388,9 +388,10 @@ if( FELTOR_WITH_NVSHMEM)
     add_library( nvshmem_feltor INTERFACE)
     target_include_directories( nvshmem_feltor INTERFACE "${NVSHMEM_INCLUDE_DIR}")
     # nvshmem_host: CPU-side API; nvshmem_device (libnvshmem.a): init/finalize +
-    # device runtime, device-linked; cuda: driver.
+    # device runtime, device-linked; CUDA::cudart: runtime API that libnvshmem.a
+    # depends on (cudaGetDeviceProperties_v2 etc.); cuda: driver API.
     target_link_libraries( nvshmem_feltor INTERFACE
-        "${NVSHMEM_HOST_LIBRARY}" nvshmem_device "-lcuda")
+        "${NVSHMEM_HOST_LIBRARY}" nvshmem_device CUDA::cudart "-lcuda")
 
     # Required so nvcc compiles consumers with -rdc=true and runs the device-link
     # that resolves libnvshmem.a's __cudaRegisterLinkedBinary.  Set as a directory

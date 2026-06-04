@@ -410,6 +410,19 @@ if( FELTOR_WITH_NVSHMEM)
         "-Wl,--start-group" nvshmem_device CUDA::cudart "-Wl,--end-group"
         "-lcuda")
 
+    # CRITICAL: libnvshmem.a carries relocatable device code whose
+    # __cudaRegisterLinkedBinary constructor registers NVSHMEM's device kernels
+    # with the CUDA runtime.  An IMPORTED STATIC archive added through
+    # target_link_libraries reaches only the HOST link (linkLibs.rsp); CMake does
+    # NOT forward it to the `nvcc -dlink` step (dlink.txt).  When the archive is
+    # absent from the device link, the device image is never registered, so the
+    # first device/stream API (nvshmemx_putmem_on_stream) aborts with
+    # "NVSHMEM API called before NVSHMEM initialization has completed" even though
+    # host-side init (malloc, teams) succeeded.  Force the archive into the device
+    # link explicitly via the DEVICE_LINK generator expression.
+    target_link_options( nvshmem_feltor INTERFACE
+        "$<DEVICE_LINK:${NVSHMEM_DEVICE_LIBRARY}>")
+
     # Required so nvcc compiles consumers with -rdc=true and runs the device-link
     # that resolves libnvshmem.a's __cudaRegisterLinkedBinary.  Set as a directory
     # variable here (before the benchmark/test targets are created below) so those

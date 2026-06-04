@@ -398,15 +398,20 @@ if( FELTOR_WITH_NVSHMEM)
 
     add_library( nvshmem_feltor INTERFACE)
     target_include_directories( nvshmem_feltor INTERFACE "${NVSHMEM_INCLUDE_DIR}")
-    # nvshmem_host: CPU-side API; nvshmem_device (libnvshmem.a): init/finalize +
-    # device runtime, device-linked; CUDA::cudart: runtime API that libnvshmem.a
-    # depends on (cudaGetDeviceProperties_v2 etc.); cuda: driver API.
-    # libnvshmem.a is a static archive that references cudart symbols, so cudart
-    # must be resolvable *after* it.  Wrap both in --start-group/--end-group so
-    # the linker iterates until the cross-references are satisfied, independent
-    # of the order CMake emits them in.
+    # Link ONLY the monolithic static archive libnvshmem.a for the host side --
+    # do NOT also link libnvshmem_host.so.  On this nvhpc-25.11 bundle the two
+    # overlap: nvshmemx_putmem_on_stream (and its internal runtime state) is
+    # defined in BOTH, while the bootstrap core (nvshmemi_common_init,
+    # nvshmemi_boot*) lives ONLY in libnvshmem.a.  Linking both gives two copies
+    # of the host state: nvshmem init runs through libnvshmem.a's common_init and
+    # sets ITS state, but the gather's nvshmemx_putmem_on_stream resolves to
+    # libnvshmem_host.so's copy, which is never initialised -> the put aborts with
+    # "NVSHMEM API called before NVSHMEM initialization has completed" even though
+    # init (and team setup) completed.  libnvshmem.a is self-contained (init +
+    # host API + device runtime), so one archive = one consistent state.
+    # cudart/cuda are referenced by the archive; --start-group lets the linker
+    # iterate until the cross-references resolve regardless of emit order.
     target_link_libraries( nvshmem_feltor INTERFACE
-        "${NVSHMEM_HOST_LIBRARY}"
         "-Wl,--start-group" nvshmem_device CUDA::cudart "-Wl,--end-group"
         "-lcuda")
 

@@ -54,10 +54,20 @@ int main(int argc, char* argv[])
 #ifdef DG_WITH_NVSHMEM
     // NVSHMEM must be initialised after cudaSetDevice (done by mpi_init above)
     // and before the first symv that triggers nvshmem_malloc in the gather path.
-    nvshmemx_init_attr_t nvshmem_attr;
+    nvshmemx_init_attr_t nvshmem_attr = {}; // zero-init: leave no garbage fields
     MPI_Comm nvshmem_bootstrap = MPI_COMM_WORLD;
     nvshmem_attr.mpi_comm = &nvshmem_bootstrap;
-    nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &nvshmem_attr);
+    int nvshmem_status = nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &nvshmem_attr);
+    if (nvshmem_status != 0) {
+        std::cerr << "FATAL: nvshmemx_init_attr returned " << nvshmem_status
+                  << " -- NVSHMEM runtime did not initialise.\n";
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    // Fail loudly here rather than at the first nvshmemx_putmem_on_stream if the
+    // device runtime image (libnvshmem.a, needs nvcc -dlink) was not registered:
+    // host-side init can succeed while device/stream APIs report "init not
+    // complete".  A barrier forces all PEs past init before any RMA is posted.
+    nvshmem_barrier_all();
 #endif // DG_WITH_NVSHMEM
 
     int rank;

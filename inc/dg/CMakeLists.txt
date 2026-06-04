@@ -330,8 +330,7 @@ endif()
 if( FELTOR_CUDA_UNAWARE_MPI)
     target_compile_definitions( dg_dg INTERFACE DG_CUDA_UNAWARE_MPI)
 endif()
-# NVSHMEM support: enables the production NVSHMEM halo-exchange path in symv
-# as well as the mpi_matrix_nvshmem_b benchmark.
+# NVSHMEM support: enables the production NVSHMEM halo-exchange path in symv.
 # Requires NVSHMEM_HOME to be set in the environment.
 # Usage: cmake -DFELTOR_WITH_NVSHMEM=ON ...
 option( FELTOR_WITH_NVSHMEM "Enable NVSHMEM-backed halo exchange in symv" OFF)

@@ -161,6 +161,7 @@ set(DG_BENCHMARKS
   helmholtz_b.cpp
   helmholtzg2_b.cpp
   mpi_matrix_b.cpp
+  nvshmem_b.cpp
   multigrid_b.cpp
   poisson_b.cpp
   refined_elliptic2d_b.cpp

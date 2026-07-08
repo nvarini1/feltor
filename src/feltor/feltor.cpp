@@ -304,6 +304,7 @@ int main( int argc, char* argv[])
             for( unsigned j=1; j<=p.itstp; j++)
             {
                 try{
+                    DG_NVTX_RANGE_C("feltor-integrate", 0xff0d47a1);
                     odeint->integrate( time, y0, t_output + j*p.deltaT, y0,
                         j<p.itstp ? dg::to::at_least :  dg::to::exact);
                 }
@@ -359,6 +360,7 @@ int main( int argc, char* argv[])
                         << var.duration/(double)p.itstp<<"s";
 
             ti.tic();
+            DG_NVTX_RANGE_C("feltor-output", 0xff616161);
             //////////////////////////write fields////////////////////////
             file.open( file_name, dg::file::nc_write);
             probes.flush();

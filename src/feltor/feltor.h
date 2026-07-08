@@ -2,6 +2,7 @@
 
 #include "dg/algorithm.h"
 #include "dg/geometries/geometries.h"
+#include "dg/backend/nvtx.h"
 #include "parameters.h"
 #include "common.h"
 
@@ -1724,6 +1725,8 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::operator()(
        y[1][1] := W_i^dagger
     */
 
+    DG_NVTX_RANGE_C("feltor::Explicit::rhs", 0xff004d40);
+
     dg::Timer timer;
     double accu = 0.;//accumulated time
     timer.tic();
@@ -1732,10 +1735,13 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::operator()(
 
 #if FELTORPERP == 1
 
-    // set m_potential[0]
-    compute_phi( t, m_density, m_potential[0]);//, false);
-    // set m_potential[1] and m_UE2 --- needs m_potential[0]
-    compute_psi( t, m_potential[0], m_potential[1]);//, false);
+    {
+        DG_NVTX_RANGE_C("rhs-phi-psi", 0xffc62828);
+        // set m_potential[0]
+        compute_phi( t, m_density, m_potential[0]);//, false);
+        // set m_potential[1] and m_UE2 --- needs m_potential[0]
+        compute_psi( t, m_potential[0], m_potential[1]);//, false);
+    }
 
 #else
 
@@ -1748,6 +1754,7 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::operator()(
                        << timer.diff()<<"s\t A: "<<accu<<"s\n";
     timer.tic( );
 
+    DG_NVTX_PUSH("rhs-phi-psi-ST");
     //Compute m_densityST and m_potentialST
     update_staggered_density_and_phi( t, m_density, m_potential);
     update_staggered_density_and_ampere( t, m_density);
@@ -1757,12 +1764,14 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::operator()(
     //compute_phi( t, m_densityST, m_potentialST[0], true);
     //// set m_potentialST[1]  --- needs m_potentialST[0]
     //compute_psi( t, m_potentialST[0], m_potentialST[1], true);
+    DG_NVTX_POP(); // rhs-phi-psi-ST
     timer.toc();
     accu += timer.diff();
     DG_RANK0 std::cout << "## Compute phi and psi ST            took "
                        << timer.diff()<<"s\t A: "<<accu<<"s\n";
     timer.tic( );
 
+    DG_NVTX_PUSH("rhs-apar-ST");
     // Compute m_aparST and m_velocityST if necessary
     dg::blas1::copy( y[1], m_velocityST);
     if( m_p.beta != 0)
@@ -1772,12 +1781,14 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::operator()(
     //Compute m_velocity and m_apar
     update_velocity_and_apar( t, m_velocityST, m_aparST);
 
+    DG_NVTX_POP(); // rhs-apar-ST
     timer.toc();
     accu += timer.diff();
     DG_RANK0 std::cout << "## Compute Apar and staggered        took "
                        << timer.diff()<<"s\t A: "<<accu<<"s\n";
     timer.tic( );
 
+    DG_NVTX_PUSH("rhs-perp-dynamics");
 #if FELTORPERP == 1
 
     // Set perpendicular dynamics in yp
@@ -1792,12 +1803,14 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::operator()(
 
 #endif
 
+    DG_NVTX_POP(); // rhs-perp-dynamics
     timer.toc();
     accu += timer.diff();
     DG_RANK0 std::cout << "## Compute perp dynamics             took "
                        << timer.diff() << "s\t A: "<<accu<<"s\n";
     timer.tic();
 
+    DG_NVTX_PUSH("rhs-parallel-and-sources");
     // Add parallel dynamics
 #if FELTORPARALLEL == 1
 
@@ -1840,6 +1853,7 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::operator()(
     // set m_s
     add_source_terms( yp );
 
+    DG_NVTX_POP(); // rhs-parallel-and-sources
     timer.toc();
     accu += timer.diff();
     #ifdef MPI_VERSION

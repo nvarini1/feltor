@@ -4,6 +4,7 @@
 #include "sparseblockmat.h"
 #include "memory.h"
 #include "timer.h"
+#include "nvtx.h"
 
 
 
@@ -188,8 +189,10 @@ struct MPISparseBlockMat
     {
         // ContainerType is MPI_Vector here...
         //the blas2 functions should make enough static assertions on tpyes
+        DG_NVTX_RANGE_C("dg::RowColDistMat::symv", 0xff2e7d32);
         if( !m_g.isCommunicating()) //no communication needed
         {
+            DG_NVTX_RANGE("dg-symv-local");
             dg::blas2::symv( alpha, m_i, x.data(), beta, y.data());
             return;
 
@@ -202,15 +205,25 @@ struct MPISparseBlockMat
         m_buffer_ptrs.template set<const value_type*>( m_o.num_cols);
         auto& buffer_ptrs = m_buffer_ptrs.template get<const value_type*>();
         // 1 initiate communication
-        m_g.global_gather_init( x.data());
+        {
+            DG_NVTX_RANGE_C("dg-symv-gather_init", 0xffc62828);
+            m_g.global_gather_init( x.data());
+        }
         // 2 compute inner points
-        dg::blas2::symv( alpha, m_i, x.data(), beta, y.data());
+        {
+            DG_NVTX_RANGE_C("dg-symv-inner", 0xff1565c0);
+            dg::blas2::symv( alpha, m_i, x.data(), beta, y.data());
+        }
         // 3 wait for communication to finish
-        m_g.global_gather_wait( x.data(), buffer_ptrs);
+        {
+            DG_NVTX_RANGE_C("dg-symv-gather_wait", 0xffef6c00);
+            m_g.global_gather_wait( x.data(), buffer_ptrs);
+        }
         // Local computation may be unnecessary
         if( buffer_ptrs.size() > 0)
         {
             // 4 compute and add outer points
+            DG_NVTX_RANGE_C("dg-symv-outer", 0xff6a1b9a);
             const value_type** b_ptrs = thrust::raw_pointer_cast( buffer_ptrs.data());
                   value_type*  y_ptr  = thrust::raw_pointer_cast( y.data().data());
             m_o.symv( SharedVectorTag(), dg::get_execution_policy<ContainerType1>(),

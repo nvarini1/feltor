@@ -332,6 +332,15 @@ endif()
 if( FELTOR_CUDA_UNAWARE_MPI)
     target_compile_definitions( dg_dg INTERFACE DG_CUDA_UNAWARE_MPI)
 endif()
+# NVTX instrumentation: activates the dg/feltor NVTX ranges (feltor-integrate,
+# feltor::Explicit::rhs, rhs-*, dg-symv-*, ...) guarded by DG_ENABLE_NVTX in
+# inc/dg/backend/nvtx.h, so they show up as annotated ranges in Nsight Systems.
+# The nvtx3 headers ship with the CUDA toolkit (header-only, nothing to link).
+# Usage: cmake -DFELTOR_WITH_NVTX=ON ...
+option( FELTOR_WITH_NVTX "Enable NVTX profiling ranges in dg and feltor (visible in Nsight Systems)." OFF)
+if( FELTOR_WITH_NVTX)
+    target_compile_definitions( dg_dg INTERFACE DG_ENABLE_NVTX)
+endif()
 # NVSHMEM support: enables the production NVSHMEM halo-exchange path in symv.
 # Requires NVSHMEM_HOME to be set in the environment.
 # Usage: cmake -DFELTOR_WITH_NVSHMEM=ON ...

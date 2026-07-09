@@ -1731,7 +1731,7 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::operator()(
     double accu = 0.;//accumulated time
     timer.tic();
 
-    dg::blas1::copy( y[0], m_density),
+    dg::blas1::copy( y[0], m_density);
 
 #if FELTORPERP == 1
 

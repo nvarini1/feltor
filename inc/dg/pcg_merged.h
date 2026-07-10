@@ -9,8 +9,13 @@
 #include "functors.h"
 #include "extrapolation.h"
 #include "backend/typedefs.h"
-#include "backend/exblas/mpi_accumulate.h"   // reduce_mpi_cpu, mpi_reduce_communicator
 #include "backend/exblas/accumulate.h"        // exblas::cpu::Round
+// NOTE: do NOT include <mpi.h> / exblas/mpi_accumulate.h here. Like pcg.h, this
+// header must not pull in MPI headers itself (that flips MPI_VERSION mid-TU and
+// breaks config.h / the dg::x:: grid aliases). Under an MPI build the symbols
+// reduce_mpi_cpu / mpi_reduce_communicator are already provided transitively by
+// blas.h's MPI dispatch (backend/blas1_dispatch_mpi.h) and are used below only
+// inside #ifdef MPI_VERSION.
 
 /*!@file
  * Single-reduction Preconditioned CG (Chronopoulos-Gear) solver.

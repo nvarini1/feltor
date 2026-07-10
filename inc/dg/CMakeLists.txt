@@ -95,6 +95,7 @@ set(DG_HEADERS
   nullstelle.h
   ode.h
   pcg.h
+  pcg_merged.h
   poisson.h
   refined_elliptic.h
   runge_kutta.h
@@ -189,6 +190,7 @@ set(DG_TESTS
   multistep_t.cpp
   nullstelle_t.cpp
   pcg_t.cpp
+  pcg_merged_t.cpp
   poisson_t.cpp
   runge_kutta_t.cpp
   simpsons_t.cpp
@@ -240,6 +242,7 @@ list( APPEND DG_MPI_TESTS
     arakawa_t.cpp
     poisson_t.cpp
     bicgstabl_t.cpp
+    pcg_merged_t.cpp
     blas_t.cpp
     blas1_t.cpp
 )

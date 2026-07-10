@@ -1,80 +1,68 @@
-// Validation: PCGmerged (single-reduction CG) vs stock PCG on a 2D elliptic
-// (negative Laplacian) problem. Checks that both converge to the same solution
-// and reports iteration counts.
-//
-// Build (host, serial/OMP is enough to validate correctness):
-//   g++  -std=c++17 -I../ -I../../inc pcg_merged_t.cpp -o pcg_merged_t
-//   mpic++ -std=c++17 -DWITH_MPI -I../ -I../../inc pcg_merged_t.cpp -o pcg_merged_mpi
-//
-// The GPU path is exercised by compiling the same TU with nvcc (device=gpu).
-
 #include <iostream>
 #include <iomanip>
-#include "dg/algorithm.h"
-#include "dg/pcg_merged.h"
 
-int main(int argc, char* argv[])
+#ifdef WITH_MPI
+#include <mpi.h>
+#include "backend/mpi_init.h"
+#endif
+
+#include "pcg.h"
+#include "pcg_merged.h"
+#include "elliptic.h"
+#include "catch2/catch_all.hpp"
+
+// Validation: PCGmerged (single-reduction Chronopoulos-Gear CG) must converge
+// to the same solution as the stock dg::PCG on an SPD elliptic problem.
+
+static const double lx = 2.*M_PI;
+static const double ly = 2.*M_PI;
+
+static double fct(double x, double y){ return sin(y)*sin(x); }
+static double laplace_fct( double x, double y){ return 2.*sin(y)*sin(x); }
+static double initial( double, double){ return 0.; }
+
+TEST_CASE( "PCGmerged matches PCG")
 {
 #ifdef WITH_MPI
-    MPI_Init( &argc, &argv);
-    MPI_Comm comm;
-    // 1D-style helper picks a decomposition; adapt np as needed on the cluster
-    int np[2] = {1,1};
-    dg::mpi_init2d( dg::DIR, dg::DIR, comm, std::cin, np);
-#else
-    (void)argc; (void)argv;
+    int rank;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank);
+    MPI_Comm comm = dg::mpi_cart_create( MPI_COMM_WORLD, {0,0}, {1,1});
 #endif
-
-    const unsigned n = 3, Nx = 64, Ny = 64;
-    const double lx = 2.*M_PI, ly = 2.*M_PI;
+    const unsigned n = 4, Nx = 36, Ny = 48;
+    dg::x::CartesianGrid2d grid( 0, lx, 0, ly, n, Nx, Ny, dg::DIR, dg::PER
 #ifdef WITH_MPI
-    dg::CartesianMPIGrid2d grid( 0, lx, 0, ly, n, Nx, Ny, dg::DIR, dg::DIR, comm);
-#else
-    dg::CartesianGrid2d grid( 0, lx, 0, ly, n, Nx, Ny, dg::DIR, dg::DIR);
+        , comm
 #endif
-    const dg::x::DVec w2d = dg::create::weights( grid);
-
-    // rhs and analytic solution for -Laplace u = f, u = sin x sin y
-    auto sol = [](double x, double y){ return sin(x)*sin(y); };
-    auto rhs = [](double x, double y){ return 2.*sin(x)*sin(y); };
-    dg::x::DVec b = dg::evaluate( rhs, grid);
-    const dg::x::DVec ana = dg::evaluate( sol, grid);
-
-    dg::Elliptic2d<dg::x::aGeometry2d, dg::x::DMatrix, dg::x::DVec> pol( grid);
-    dg::blas2::symv( w2d, b, b); // apply weights to rhs (as elliptic is self-adjoint in W)
-
+    );
+    const unsigned max_iter = n*n*Nx*Ny;
     const double eps = 1e-8;
-    const unsigned max_iter = grid.size();
 
-    // --- stock PCG ---
-    dg::x::DVec x1( dg::evaluate( dg::zero, grid));
-    dg::PCG<dg::x::DVec> pcg( x1, max_iter);
-    unsigned it1 = pcg.solve( pol, x1, b, pol.precond(), pol.weights(), eps);
+    const dg::x::DVec w2d      = dg::create::weights( grid);
+    const dg::x::DVec solution = dg::evaluate( fct, grid);
+    const dg::x::DVec b        = dg::evaluate( laplace_fct, grid);
 
-    // --- PCGmerged ---
-    dg::x::DVec x2( dg::evaluate( dg::zero, grid));
-    dg::PCGmerged<dg::x::DVec> pcgm( x2, max_iter);
-    unsigned it2 = pcgm.solve( pol, x2, b, pol.precond(), pol.weights(), eps);
+    dg::Elliptic<dg::x::CartesianGrid2d, dg::x::DMatrix, dg::x::DVec> A( grid, dg::forward);
 
-    // --- compare ---
-    dg::x::DVec err1( x1), err2( x2);
-    dg::blas1::axpby( 1., ana, -1., err1);
-    dg::blas1::axpby( 1., ana, -1., err2);
-    dg::blas1::axpby( 1., x1, -1., x2); // x2 <- x2 - x1 (solver-vs-solver diff)
-    const double e1 = sqrt( dg::blas2::dot( err1, w2d, err1));
-    const double e2 = sqrt( dg::blas2::dot( err2, w2d, err2));
-    const double dd = sqrt( dg::blas2::dot( x2,   w2d, x2  ));
+    SECTION( "solution agrees with PCG and analytic")
+    {
+        dg::x::DVec x1 = dg::evaluate( initial, grid);
+        dg::PCG<dg::x::DVec> pcg( x1, max_iter);
+        unsigned it1 = pcg.solve( A, x1, b, A.precond(), A.weights(), eps);
 
-    DG_RANK0 std::cout << std::scientific << std::setprecision(3)
-        << "PCG      iters=" << it1 << "  err_vs_analytic=" << e1 << "\n"
-        << "PCGmerged iters=" << it2 << "  err_vs_analytic=" << e2 << "\n"
-        << "||x_merged - x_pcg||_W = " << dd << "  (expect ~ solver tol)\n";
+        dg::x::DVec x2 = dg::evaluate( initial, grid);
+        dg::PCGmerged<dg::x::DVec> pcgm( x2, max_iter);
+        unsigned it2 = pcgm.solve( A, x2, b, A.precond(), A.weights(), eps);
 
-    const bool ok = (e2 < 1e-4) && (dd < 1e-4);
-    DG_RANK0 std::cout << (ok ? "PASSED\n" : "FAILED\n");
+        dg::x::DVec err( solution);
+        dg::blas1::axpby( 1., x2, -1., err);              // err = x2 - solution
+        const double e_ana = sqrt( dg::blas2::dot( err, w2d, err));
 
-#ifdef WITH_MPI
-    MPI_Finalize();
-#endif
-    return ok ? 0 : 1;
+        dg::blas1::axpby( 1., x1, -1., x2);               // x2 <- x2 - x1
+        const double e_slv = sqrt( dg::blas2::dot( x2, w2d, x2));
+
+        INFO( "PCG iters=" << it1 << "  PCGmerged iters=" << it2);
+        INFO( "err vs analytic = " << e_ana << ", solver-vs-solver = " << e_slv);
+        CHECK( e_ana < 1e-4 );        // both converge to the true solution
+        CHECK( e_slv < 1e-6 );        // the two solvers agree to solver tolerance
+    }
 }

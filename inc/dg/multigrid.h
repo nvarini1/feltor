@@ -669,16 +669,18 @@ struct MultigridCG2d
             const auto& y, auto& x)
             {
                 dg::Timer t;
-                t.tic();
+                if( m_benchmark) t.tic(); // tic()/toc() force cudaDeviceSynchronize + MPI_Barrier
                 if ( u == 0)
                     number[u] = pcg.solve( pol, x, y, pol.precond(),
                             pol.weights(), eps[u], 1, 1);
                 else
                     number[u] = pcg.solve( pol, x, y, pol.precond(),
                             pol.weights(), eps[u], 1, 10);
-                t.toc();
                 if( m_benchmark)
+                {
+                    t.toc();
                     DG_RANK0 std::cout << "# `"<<m_message<<"` stage: " << u << ", iter: " << number[u] << ", took "<<t.diff()<<"s\n";
+                }
             };
         }
         nested_iterations( ops, x, b, multi_inv_pol, m_nested);

@@ -882,7 +882,7 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::initializene(
             // ne-nbc = Gamma (ni-nbc)
             dg::blas1::transform(src, m_temp0, dg::PLUS<double>(-m_p.nbc));
             dg::blas1::plus(target, -m_p.nbc);
-            m_multigrid.set_benchmark( true, "Gamma N     ");
+            m_multigrid.set_benchmark( false, "Gamma N     ");
             std::vector<unsigned> number = m_multigrid.solve(
                 m_multi_invgammaN, target, m_temp0, m_p.eps_gamma);
             dg::blas1::plus(target, +m_p.nbc);
@@ -960,7 +960,7 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::compute_phi(
         //    m_old_gammaNST.extrapolate( time, m_temp0);
         //else
             m_old_gammaN.extrapolate( time, m_temp0);
-        m_multigrid.set_benchmark( true, "Gamma N     ");
+        m_multigrid.set_benchmark( false, "Gamma N     ");
         std::vector<unsigned> numberG = m_multigrid.solve(
             m_multi_invgammaN, m_temp0, m_temp1, m_p.eps_gamma);
         //if( staggered)
@@ -978,7 +978,7 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::compute_phi(
     //    m_old_phiST.extrapolate( time, phi);
     //else
         m_old_phi.extrapolate( time, phi);
-    m_multigrid.set_benchmark( true, "Polarisation");
+    m_multigrid.set_benchmark( false, "Polarisation");
     std::vector<unsigned> number = m_multigrid.solve(
         m_multi_pol, phi, m_temp0, m_p.eps_pol);
 #ifdef WRITE_POL_FILE
@@ -1018,7 +1018,7 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::compute_psi(
         //    m_old_psiST.extrapolate( time, psi);
         //else
             m_old_psi.extrapolate( time, psi);
-        m_multigrid.set_benchmark( true, "Gamma Phi   ");
+        m_multigrid.set_benchmark( false, "Gamma Phi   ");
         std::vector<unsigned> number = m_multigrid.solve(
             m_multi_invgammaP, psi, phi, m_p.eps_gamma);
         //if( staggered)
@@ -1060,7 +1060,7 @@ void Explicit<Geometry, IMatrix, Matrix, Container>::compute_aparST(
     //----------Invert Induction Eq----------------------------//
     if( update)
         m_old_aparST.extrapolate( time, aparST);
-    m_multigrid.set_benchmark( true, "Apar        ");
+    m_multigrid.set_benchmark( false, "Apar        ");
     std::vector<unsigned> number = m_multigrid.solve(
         m_multi_ampere, aparST, m_temp0, m_p.eps_ampere);
     if( update)

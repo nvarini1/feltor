@@ -344,6 +344,14 @@ option( FELTOR_WITH_NVTX "Enable NVTX profiling ranges in dg and feltor (visible
 if( FELTOR_WITH_NVTX)
     target_compile_definitions( dg_dg INTERFACE DG_ENABLE_NVTX)
 endif()
+
+# Use the single-reduction Chronopoulos-Gear PCG (dg::PCGmerged) inside
+# MultigridCG2d elliptic solves instead of the stock dg::PCG.
+# Usage: cmake -DFELTOR_DG_USE_PCG_MERGED=ON ...
+option( FELTOR_DG_USE_PCG_MERGED "Use dg::PCGmerged (single-reduction CG) in MultigridCG2d." OFF)
+if( FELTOR_DG_USE_PCG_MERGED)
+    target_compile_definitions( dg_dg INTERFACE DG_USE_PCG_MERGED)
+endif()
 # NVSHMEM support: enables the production NVSHMEM halo-exchange path in symv.
 # Requires NVSHMEM_HOME to be set in the environment.
 # Usage: cmake -DFELTOR_WITH_NVSHMEM=ON ...

@@ -6,6 +6,7 @@
 #include "topology/interpolation.h"
 #include "blas.h"
 #include "pcg.h"
+#include "pcg_merged.h"
 #include "chebyshev.h"
 #include "eve.h"
 #include "backend/timer.h"
@@ -690,7 +691,13 @@ struct MultigridCG2d
 
   private:
     dg::NestedGrids<Geometry, Matrix, Container> m_nested;
+    // Build with -DDG_USE_PCG_MERGED (CMake: FELTOR_DG_USE_PCG_MERGED=ON) to
+    // use the single-reduction Chronopoulos-Gear solver in the elliptic solves.
+#ifdef DG_USE_PCG_MERGED
+    std::vector< PCGmerged<Container> > m_pcg;
+#else
     std::vector< PCG<Container> > m_pcg;
+#endif
     unsigned m_stages;
     bool m_benchmark = true;
     std::string m_message = "Nested Iterations";

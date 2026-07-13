@@ -16,6 +16,11 @@
 // reduce_mpi_cpu / mpi_reduce_communicator are already provided transitively by
 // blas.h's MPI dispatch (backend/blas1_dispatch_mpi.h) and are used below only
 // inside #ifdef MPI_VERSION.
+#ifdef DG_WITH_NCCL
+// Only active in an MPI+CUDA (NCCL) build, where <mpi.h>/nccl.h/exblas CUDA
+// kernels are already live, so this does not flip MPI_VERSION mid-TU.
+#include "backend/exblas/nccl_accumulate.h" // exblas::detail::fused_wdot_nccl
+#endif
 
 /*!@file
  * Single-reduction Preconditioned CG (Chronopoulos-Gear) solver.
@@ -113,6 +118,22 @@ PCGmerged<ContainerType>::fused_wdot(
     int status = 0;
     constexpr int NB = exblas::BIN_COUNT;
 #ifdef MPI_VERSION
+    if constexpr( dg::nccl_mpi ) // true only in a DG_WITH_NCCL build
+    {
+#ifdef DG_WITH_NCCL
+        // On-device single reduction via NCCL. Bit-for-bit identical to the MPI
+        // path below as long as a single un-normalized int64 sum cannot overflow
+        // (exblas bound: <= 256 accumulators); fall through to MPI otherwise.
+        int comm_size = 0;
+        MPI_Comm_size( a0.communicator(), &comm_size);
+        if( comm_size <= 256 )
+            return dg::exblas::detail::fused_wdot_nccl(
+                    a0.communicator(), Wgt.data(),
+                    a0.data(), b0.data(),
+                    a1.data(), b1.data(),
+                    a2.data(), b2.data(), &status);
+#endif
+    }
     // --- local exact accumulators (each does one D2H copy of its superacc) ---
     // NOTE: assumes MPI containers expose .data() (local container) and
     // .communicator(). doDot_superacc is the weighted 3-vector local reduction.

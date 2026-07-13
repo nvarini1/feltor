@@ -41,19 +41,23 @@ namespace detail
  *
  * Computes, exactly and reproducibly, the three global weighted inner products
  *   g_k = sum_procs sum_i a_k[i] * W[i] * b_k[i]     (k = 0,1,2)
- * The three local exact superaccumulators are laid out contiguously in one
- * device buffer and reduced in a SINGLE ncclAllReduce (ncclInt64 + ncclSum,
- * which is an exact integer sum -- bit-for-bit identical to the MPI_LONG/MPI_SUM
- * fast path in reduce_mpi_cpu). Valid as long as the number of ranks cannot
- * overflow the un-normalized superaccumulators (the documented exblas bound is
- * <= 256 accumulators); the caller must guard larger communicators.
+ * The three local exact superaccumulators (plus a trailing status word) are
+ * laid out contiguously in one device buffer and reduced in a SINGLE
+ * ncclAllReduce (ncclInt64 + ncclSum, which is an exact integer sum --
+ * bit-for-bit identical to the MPI_LONG/MPI_SUM fast path in reduce_mpi_cpu).
+ * No MPI collective is issued at all: the non-finite status flag rides along in
+ * the same reduction instead of a separate MPI_Allreduce. Valid as long as the
+ * number of ranks cannot overflow the un-normalized superaccumulators (the
+ * documented exblas bound is <= 256 accumulators); the caller must guard larger
+ * communicators.
  *
  * @param comm the MPI communicator the reduction runs over (used to look up the
  *   cached NCCL communicator via dg::detail::getNcclComm)
  * @param W local weight container (must expose .data() and .size())
  * @param a0,b0,a1,b1,a2,b2 local operand containers (same length as W)
- * @param status set to 1 if any local dot flagged a non-finite value, reduced
- *   with MPI_MAX so every rank agrees (matches reduce_mpi_cpu semantics)
+ * @param status set to 1 (on every rank) if any rank's local dot flagged a
+ *   non-finite value; folded into the ncclAllReduce (ncclSum over a 0/1 flag is
+ *   equivalent to the MPI_MAX reduce_mpi_cpu uses), so no separate collective
  * @return the three rounded double results {g0, g1, g2}
  */
 template<class LC, class MC>
@@ -67,12 +71,14 @@ inline std::array<double,3> fused_wdot_nccl(
     constexpr int NB = exblas::BIN_COUNT;
     const unsigned size = a0.size();
 
-    // --- three local exact superaccumulators packed in ONE device buffer ---
-    // Reused across iterations (static) so there is no per-call allocation.
+    // --- three local superaccumulators + one status word in ONE device buffer ---
+    // Layout: [ acc0 | acc1 | acc2 | status ] = 3*NB + 1 int64 words. Reused
+    // across iterations (static) so there is no per-call allocation.
     // exdot_gpu writes the accumulator on the default stream and reads its
     // device-side error flag on the host before returning, which synchronizes
-    // the default stream -- so d_acc is complete before the NCCL call below.
-    static thrust::device_vector<int64_t> d_accV( 3*NB);
+    // the default stream -- so the accumulators are complete before the NCCL
+    // call below.
+    static thrust::device_vector<int64_t> d_accV( 3*NB + 1);
     int64_t* d_acc = thrust::raw_pointer_cast( d_accV.data());
     auto raw = [](const auto& c){ return thrust::raw_pointer_cast( c.data()); };
 
@@ -81,27 +87,39 @@ inline std::array<double,3> fused_wdot_nccl(
     exblas::exdot_gpu( size, raw(a1), raw(W), raw(b1), d_acc + 1*NB, &st); s |= st;
     exblas::exdot_gpu( size, raw(a2), raw(W), raw(b2), d_acc + 2*NB, &st); s |= st;
 
-    // --- single on-device reduction of all three superaccumulators ---
     ncclComm_t ncclcomm;
     cudaStream_t stream;
     dg::detail::getNcclComm( comm, &ncclcomm, &stream);
-    ncclAllReduce( d_acc, d_acc, 3*NB, ncclInt64, ncclSum, ncclcomm, stream);
+
+    // Fold the local status (non-finite) flag into the reduction buffer so it
+    // rides along in the SAME collective -- this removes the per-call
+    // MPI_Allreduce that previously reduced status separately (a residual MPI
+    // collective paired 1:1 with every NCCL call, serializing the two comm
+    // layers). ncclSum over a 0/1 flag is equivalent to MPI_MAX here: the sum is
+    // nonzero iff any rank flagged non-finite, and with <= 256 ranks (the exblas
+    // bound the caller guards) it cannot overflow int64. Enqueued on `stream`
+    // ahead of the collective so the write is ordered before the read; hs stays
+    // in scope until the stream is synchronized below.
+    int64_t hs = s;
+    cudaMemcpyAsync( d_acc + 3*NB, &hs, sizeof(int64_t),
+            cudaMemcpyHostToDevice, stream);
+
+    // --- single on-device reduction of the accumulators AND the status word ---
+    ncclAllReduce( d_acc, d_acc, 3*NB + 1, ncclInt64, ncclSum, ncclcomm, stream);
     // Wait for the collective to be issued, then for the stream to drain
     // (getNcclComm creates non-blocking communicators -- see mpi_gather.h).
     dg::detail::ncclCommSynchronize( ncclcomm);
     cudaStreamSynchronize( stream);
 
-    // --- single D2H copy of the reduced accumulators, then round on host ---
-    std::vector<int64_t> out( 3*NB);
-    cudaError_t code = cudaMemcpy( &out[0], d_acc, 3*NB*sizeof(int64_t),
+    // --- single D2H copy of the reduced accumulators + status, round on host ---
+    std::vector<int64_t> out( 3*NB + 1);
+    cudaError_t code = cudaMemcpy( &out[0], d_acc, (3*NB + 1)*sizeof(int64_t),
             cudaMemcpyDeviceToHost);
     if( code != cudaSuccess)
         throw dg::Error( dg::Message(_ping_)<<cudaGetErrorString(code));
 
-    // status (non-finite detection) is tiny -- keep it on MPI, MPI_MAX so all
-    // ranks agree, matching reduce_mpi_cpu's separate status Allreduce.
-    *status = s;
-    MPI_Allreduce( MPI_IN_PLACE, status, 1, MPI_INT, MPI_MAX, comm);
+    // globally-agreed status: nonzero iff any rank saw a non-finite value.
+    *status = (out[3*NB] != 0) ? 1 : 0;
 
     return { exblas::cpu::Round( &out[0*NB]),
              exblas::cpu::Round( &out[1*NB]),

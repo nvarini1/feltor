@@ -16,9 +16,12 @@
 // reduce_mpi_cpu / mpi_reduce_communicator are already provided transitively by
 // blas.h's MPI dispatch (backend/blas1_dispatch_mpi.h) and are used below only
 // inside #ifdef MPI_VERSION.
-#ifdef DG_WITH_NCCL
+#if defined(DG_WITH_NCCL) && defined(MPI_VERSION)
 // Only active in an MPI+CUDA (NCCL) build, where <mpi.h>/nccl.h/exblas CUDA
-// kernels are already live, so this does not flip MPI_VERSION mid-TU.
+// kernels are already live. MPI_VERSION is required in the guard because
+// DG_WITH_NCCL alone is also defined for the non-MPI *_b benchmark targets --
+// including this header there would flip MPI_VERSION mid-TU. blas.h (included
+// above) has already established MPI_VERSION for a real MPI build by this point.
 #include "backend/exblas/nccl_accumulate.h" // exblas::detail::fused_wdot_nccl
 #endif
 

@@ -8,21 +8,27 @@
  *  them with a single ncclAllReduce (device->device over NVLink), copying only
  *  the final reduced result back to the host once.
  *
- *  Only compiled when DG_WITH_NCCL is defined (i.e. dg::nccl_mpi == true), which
- *  is an MPI + CUDA build where <mpi.h>, nccl.h and the exblas CUDA kernels are
- *  all already live in the translation unit.
+ *  Only compiled when DG_WITH_NCCL and MPI_VERSION are both defined (an MPI +
+ *  CUDA + NCCL build, dg::nccl_mpi == true), where <mpi.h>, nccl.h and the exblas
+ *  CUDA kernels are all already live in the translation unit.
  */
 #pragma once
-#ifdef DG_WITH_NCCL
+// Guarded by BOTH DG_WITH_NCCL and MPI_VERSION. This header must NOT include
+// <mpi.h> or mpi_gather.h: DG_WITH_NCCL is defined project-wide (it is set on
+// the dg_dg INTERFACE target, so even the non-MPI *_b benchmark targets see it),
+// so pulling an MPI header in here would flip MPI_VERSION mid-TU and break
+// config.h / the dg::x:: grid aliases -- the exact hazard pcg_merged.h's include
+// guard avoids. In a real feltor_mpi + NCCL build, <mpi.h>, nccl.h and
+// dg::detail::getNcclComm are already live transitively when this is included.
+#if defined(DG_WITH_NCCL) && defined(MPI_VERSION)
 
 #include <array>
 #include <vector>
-#include <mpi.h>
 #include <thrust/device_vector.h>
 
 #include "accumulate.h"          // exblas::cpu::Round, exblas::BIN_COUNT
 #include "exdot_cuda.cuh"        // exblas::exdot_gpu (device weighted dot)
-#include "../mpi_gather.h"       // dg::detail::getNcclComm / ncclCommSynchronize
+#include "../exceptions.h"       // dg::Error / dg::Message / _ping_
 
 namespace dg
 {
@@ -106,4 +112,4 @@ inline std::array<double,3> fused_wdot_nccl(
 } //namespace exblas
 } //namespace dg
 
-#endif // DG_WITH_NCCL
+#endif // DG_WITH_NCCL && MPI_VERSION

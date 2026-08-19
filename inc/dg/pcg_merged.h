@@ -4,6 +4,8 @@
 #include <cmath>
 #include <array>
 #include <vector>
+#include <utility>
+#include <type_traits>
 
 #include "blas.h"
 #include "functors.h"
@@ -103,6 +105,15 @@ class PCGmerged
         const C& a1, const C& b1,
         const C& a2, const C& b2) const;
 
+    // General K-dot fused reduction: g[k] = <a_k, W, b_k>, all K computed from
+    // a SINGLE host copy and, under MPI, a SINGLE collective. Used to collapse
+    // the per-solve SETUP reductions (nrmb, initial residual, gamma, delta) into
+    // one collective; the hot loop keeps the specialized 3-dot fused_wdot above.
+    template<class M, class C>
+    std::vector<value_type> fused_wdot_n(
+        const M& Wgt,
+        const std::vector<std::pair<const C*, const C*> >& pairs) const;
+
     ContainerType r, z, p, s, w;
     unsigned max_iter = 0;
     bool m_verbose = false, m_throw_on_fail = true;
@@ -168,6 +179,65 @@ PCGmerged<ContainerType>::fused_wdot(
 }
 
 template< class ContainerType>
+template<class M, class C>
+std::vector<get_value_type<ContainerType>>
+PCGmerged<ContainerType>::fused_wdot_n(
+        const M& Wgt,
+        const std::vector<std::pair<const C*, const C*> >& pairs) const
+{
+    int status = 0;
+    const int K = static_cast<int>( pairs.size());
+    constexpr int NB = exblas::BIN_COUNT;
+#ifdef MPI_VERSION
+    if constexpr( dg::nccl_mpi ) // true only in a DG_WITH_NCCL build
+    {
+#ifdef DG_WITH_NCCL
+        int comm_size = 0;
+        MPI_Comm_size( pairs[0].first->communicator(), &comm_size);
+        if( comm_size <= 256 )
+        {
+            // Reduce all K exact accumulators on-device in one ncclAllReduce.
+            // The local containers (device_vectors) are the .data() members.
+            using LC = std::decay_t<decltype( pairs[0].first->data())>;
+            std::vector<std::pair<const LC*, const LC*> > lpairs;
+            lpairs.reserve( K);
+            for( const auto& pr : pairs)
+                lpairs.emplace_back( &pr.first->data(), &pr.second->data());
+            return dg::exblas::detail::fused_wdot_nccl_n(
+                    pairs[0].first->communicator(), Wgt.data(), lpairs, &status);
+        }
+#endif
+    }
+    // --- local exact accumulators (one D2H copy of each superacc) packed and
+    //     reduced in ONE MPI collective over all K accumulators ---
+    std::vector<int64_t> in( K*NB), out( K*NB, (int64_t)0);
+    for( int k = 0; k < K; k++)
+    {
+        std::vector<int64_t> lk = dg::blas2::detail::doDot_superacc(
+                &status, pairs[k].first->data(), Wgt.data(), pairs[k].second->data());
+        std::copy( lk.begin(), lk.end(), in.begin() + k*NB);
+    }
+    MPI_Comm comm = pairs[0].first->communicator(), comm_mod, comm_red;
+    dg::exblas::mpi_reduce_communicator( comm, &comm_mod, &comm_red);
+    dg::exblas::reduce_mpi_cpu( K, in.data(), out.data(), comm, comm_mod, comm_red);
+
+    std::vector<value_type> res( K);
+    for( int k = 0; k < K; k++)
+        res[k] = exblas::cpu::Round( &out[k*NB]);
+    return res;
+#else
+    std::vector<value_type> res( K);
+    for( int k = 0; k < K; k++)
+    {
+        std::vector<int64_t> lk = dg::blas2::detail::doDot_superacc(
+                &status, *pairs[k].first, Wgt, *pairs[k].second);
+        res[k] = exblas::cpu::Round( lk.data());
+    }
+    return res;
+#endif
+}
+
+template< class ContainerType>
 template< class Matrix, class ContainerType0, class ContainerType1,
           class Preconditioner, class ContainerType2>
 unsigned PCGmerged< ContainerType>::solve(
@@ -175,30 +245,63 @@ unsigned PCGmerged< ContainerType>::solve(
         Preconditioner&& P, const ContainerType2& W,
         value_type eps, value_type nrmb_correction, int)
 {
-    value_type nrmb = sqrt( blas2::dot( W, b));
-    value_type tol = eps*(nrmb + nrmb_correction);
 #ifdef MPI_VERSION
     int rank; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 #endif
+    // r = b - A x
+    blas2::symv( std::forward<Matrix>(A), x, r);
+    blas1::axpby( 1., b, -1., r);
+
+    // z = P r ;  p = z ;  s = A p
+    // These preconditioner/matrix applies are hoisted ABOVE the setup reduction
+    // so that all four setup inner products are available at the SAME point and
+    // can be folded into a SINGLE collective. Trade-off vs dg::PCG: the two
+    // symv's are done unconditionally, even in the (rare, in a time-stepping
+    // context with an extrapolated initial guess) case where the initial
+    // residual already satisfies the stopping criterion. Two extra local SpMVs
+    // are far cheaper than the three global reductions this saves per solve --
+    // and the coarse-grid solves, where the dot products dominate (see
+    // MultigridCG2d::solve), do only a handful of iterations, so collapsing the
+    // setup reductions is exactly where it pays off.
+    blas2::symv( std::forward<Preconditioner>(P), r, z);
+    blas1::copy( z, p);
+    blas2::symv( std::forward<Matrix>(A), p, s);
+
+    // ---- single fused setup reduction ----
+    //   g[0] = <b,W,b> = nrmb^2         (right-hand-side norm, for the tolerance)
+    //   g[1] = <r,W,r> = |r|_W^2        (initial residual, for early return)
+    //   g[2] = <r,W,z>                  (gamma)
+    //   g[3] = <p,W,s>                  (delta)
+    // Down from four separate blas2::dot collectives to one. When the RHS
+    // container type differs from the work container type the b-norm cannot join
+    // the K=3 fused list, so it falls back to its own dot (setup 4 -> 2); in the
+    // common feltor case (all containers identical) all four fuse (setup 4 -> 1).
+    value_type nrmb, res2, gamma, delta;
+    if constexpr( std::is_same_v<std::decay_t<ContainerType1>, ContainerType> )
+    {
+        std::vector<std::pair<const ContainerType*, const ContainerType*> > pr = {
+            { &b, &b }, { &r, &r }, { &r, &z }, { &p, &s } };
+        std::vector<value_type> g = fused_wdot_n( W, pr);
+        nrmb = sqrt( g[0]); res2 = g[1]; gamma = g[2]; delta = g[3];
+    }
+    else
+    {
+        nrmb = sqrt( blas2::dot( W, b));
+        std::vector<std::pair<const ContainerType*, const ContainerType*> > pr = {
+            { &r, &r }, { &r, &z }, { &p, &s } };
+        std::vector<value_type> g = fused_wdot_n( W, pr);
+        res2 = g[0]; gamma = g[1]; delta = g[2];
+    }
+
+    value_type tol = eps*(nrmb + nrmb_correction);
     if( nrmb == 0)
     {
         blas1::copy( 0., x);
         return 0;
     }
-    // r = b - A x
-    blas2::symv( std::forward<Matrix>(A), x, r);
-    blas1::axpby( 1., b, -1., r);
-    if( sqrt( blas2::dot( W, r)) < tol)
+    if( sqrt( res2) < tol)
         return 0;
 
-    // z = P r ;  p = z ;  s = A p
-    blas2::symv( std::forward<Preconditioner>(P), r, z);
-    blas1::copy( z, p);
-    blas2::symv( std::forward<Matrix>(A), p, s);
-
-    // setup scalars (two dots here, once, outside the loop)
-    value_type gamma = blas2::dot( r, W, z);   // <r,W,z>
-    value_type delta = blas2::dot( p, W, s);   // <p,W,s>
     value_type alpha = gamma/delta;
 
     for( unsigned i=1; i<max_iter; i++)

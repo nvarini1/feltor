@@ -126,6 +126,88 @@ inline std::array<double,3> fused_wdot_nccl(
              exblas::cpu::Round( &out[2*NB]) };
 }
 
+/*! @brief On-device NCCL reduction of an arbitrary number K of weighted dots.
+ *
+ * Generalization of \c fused_wdot_nccl to K >= 1 inner products sharing the
+ * same weight W. Computes, exactly and reproducibly,
+ *   g_k = sum_procs sum_i a_k[i] * W[i] * b_k[i]     (k = 0 .. K-1)
+ * The K local exact superaccumulators plus a trailing status word are laid out
+ * contiguously in ONE device buffer and reduced in a SINGLE ncclAllReduce
+ * (ncclInt64 + ncclSum). The K result and the non-finite status flag therefore
+ * cost exactly one collective, independent of K.
+ *
+ * The K value only changes the message size ((K*BIN_COUNT+1) int64 words); it
+ * does NOT affect the overflow bound, which is per-accumulator: each g_k is an
+ * un-normalized int64 sum over comm_size ranks and stays exact as long as
+ * comm_size <= 256 (the documented exblas bound the caller must guard).
+ *
+ * @param comm  the MPI communicator (used to look up the cached NCCL comm)
+ * @param W     local weight container (exposes .data() and .size())
+ * @param pairs the K operand pairs {a_k, b_k} as pointers to local containers
+ * @param status set to 1 (on every rank) iff any rank flagged a non-finite value
+ * @return the K rounded double results {g_0, .., g_{K-1}}
+ */
+template<class LC, class MC>
+inline std::vector<double> fused_wdot_nccl_n(
+        MPI_Comm comm, const MC& W,
+        const std::vector<std::pair<const LC*, const LC*> >& pairs,
+        int* status)
+{
+    constexpr int NB = exblas::BIN_COUNT;
+    const unsigned size = W.size();
+    const int K = static_cast<int>( pairs.size());
+
+    // K local superaccumulators + one status word in ONE device buffer.
+    // Layout: [ acc0 | acc1 | ... | acc_{K-1} | status ] = K*NB + 1 int64 words.
+    // A single static buffer is reused across calls (grown, never shrunk) so
+    // there is no per-call allocation once it has reached its largest K.
+    static thrust::device_vector<int64_t> d_accV;
+    if( static_cast<int>( d_accV.size()) < K*NB + 1)
+        d_accV.resize( K*NB + 1);
+    int64_t* d_acc = thrust::raw_pointer_cast( d_accV.data());
+    auto raw = [](const auto& c){ return thrust::raw_pointer_cast( c.data()); };
+
+    // --- K local exact weighted dots, each writing its own NB-word superacc ---
+    // exdot_gpu synchronizes the default stream (it reads its device error flag
+    // on the host), so every accumulator is complete before the NCCL call.
+    int s = 0, st = 0;
+    for( int k = 0; k < K; k++)
+    {
+        exblas::exdot_gpu( size, raw(*pairs[k].first), raw(W),
+                raw(*pairs[k].second), d_acc + k*NB, &st);
+        s |= st;
+    }
+
+    ncclComm_t ncclcomm;
+    cudaStream_t stream;
+    dg::detail::getNcclComm( comm, &ncclcomm, &stream);
+
+    // Fold the local status flag into the reduction buffer so it rides along in
+    // the SAME collective (see fused_wdot_nccl for the ncclSum-vs-MPI_MAX note).
+    int64_t hs = s;
+    cudaMemcpyAsync( d_acc + K*NB, &hs, sizeof(int64_t),
+            cudaMemcpyHostToDevice, stream);
+
+    // --- single on-device reduction of all K accumulators AND the status word --
+    ncclAllReduce( d_acc, d_acc, K*NB + 1, ncclInt64, ncclSum, ncclcomm, stream);
+    dg::detail::ncclCommSynchronize( ncclcomm);
+    cudaStreamSynchronize( stream);
+
+    // --- single D2H copy of the reduced accumulators + status, round on host ---
+    std::vector<int64_t> out( K*NB + 1);
+    cudaError_t code = cudaMemcpy( &out[0], d_acc, (K*NB + 1)*sizeof(int64_t),
+            cudaMemcpyDeviceToHost);
+    if( code != cudaSuccess)
+        throw dg::Error( dg::Message(_ping_)<<cudaGetErrorString(code));
+
+    *status = (out[K*NB] != 0) ? 1 : 0;
+
+    std::vector<double> res( K);
+    for( int k = 0; k < K; k++)
+        res[k] = exblas::cpu::Round( &out[k*NB]);
+    return res;
+}
+
 } //namespace detail
 } //namespace exblas
 } //namespace dg

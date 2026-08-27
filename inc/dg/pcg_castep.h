@@ -199,6 +199,9 @@ unsigned PCGcastep< ContainerType>::solve(
         Preconditioner&& P, const ContainerType2& W,
         value_type eps, value_type nrmb_correction, int)
 {
+#ifdef MPI_VERSION
+    int rank; MPI_Comm_rank(MPI_COMM_WORLD, &rank);   // used by DG_RANK0 (verbose)
+#endif
     using M = ContainerType2;
     Matrix& Aref = A;   // bind the forwarding ref once; A is reused every SpMV
     // --- symmetric split of the diagonal preconditioner:  L = sqrt(P) ---

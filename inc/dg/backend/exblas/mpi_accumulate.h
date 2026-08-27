@@ -7,6 +7,7 @@
  */
 #pragma once
 #include <mpi.h>
+#include <algorithm>
 #include <array>
 #include <vector>
 #include <map>
@@ -92,44 +93,73 @@ inline void mpi_reduce_communicator(MPI_Comm comm,
  * @sa \c exblas::mpi_reduce_communicator to generate the required communicators
 */
 inline void reduce_mpi_cpu(  unsigned num_superacc, int64_t* in, int64_t* out,
-MPI_Comm comm, MPI_Comm comm_mod, MPI_Comm comm_mod_reduce )
+MPI_Comm comm, MPI_Comm comm_mod, MPI_Comm comm_mod_reduce, int* status = nullptr )
 {
     for( unsigned i=0; i<num_superacc; i++)
     {
         int imin=exblas::IMIN, imax=exblas::IMAX;
         cpu::Normalize(&in[i*exblas::BIN_COUNT], imin, imax);
     }
+    const unsigned N = num_superacc*exblas::BIN_COUNT;
+    // When a status word is supplied, fold it into the SAME collective(s) as one
+    // extra MPI_LONG reduced with MPI_SUM, instead of issuing a separate
+    // MPI_Allreduce(MPI_MAX) per dot. The exblas status is 0 (ok) / nonzero
+    // (NaN-Inf or overflow); a summed nonzero preserves the caller's status!=0
+    // error check exactly while removing one latency-bound collective per
+    // reduction -- the dominant cost of the communication-bound elliptic solves.
+    // The status slot lives PAST the superaccumulators, so the Normalize passes
+    // (which only touch [i*BIN_COUNT, ..) for i<num_superacc) never disturb it.
+    const bool fold = (status != nullptr);
+    const unsigned total = N + (fold ? 1u : 0u);
+    std::vector<int64_t> aug_in, aug_out;
+    int64_t *pin = in, *pout = out;
+    if( fold)
+    {
+        aug_in.assign( in, in+N);
+        aug_in.push_back( static_cast<int64_t>( *status));
+        aug_out.assign( total, (int64_t)0);
+        pin = aug_in.data();
+        pout = aug_out.data();
+    }
+
     int size_comm, size_comm_mod;
     MPI_Comm_size( comm, &size_comm);
     MPI_Comm_size( comm_mod, &size_comm_mod);
     if( size_comm == size_comm_mod) // size < 128
     {
-        MPI_Allreduce( in, out, num_superacc*exblas::BIN_COUNT, MPI_LONG, MPI_SUM, comm);
-        return;
+        MPI_Allreduce( pin, pout, total, MPI_LONG, MPI_SUM, comm);
+    }
+    else
+    {
+        MPI_Reduce(pin, pout, total, MPI_LONG, MPI_SUM, 0, comm_mod);
+        int rank;
+        MPI_Comm_rank( comm_mod, &rank);
+        if(rank == 0)
+        {
+            int size;
+            MPI_Comm_size( comm_mod_reduce, &size);
+            if( size > 1)
+            {
+                for( unsigned i=0; i<num_superacc; i++)
+                {
+                    int imin=exblas::IMIN, imax=exblas::IMAX;
+                    cpu::Normalize(&pout[i*exblas::BIN_COUNT], imin, imax);
+                    for( int k=0; k<exblas::BIN_COUNT; k++)
+                        pin[i*BIN_COUNT+k] = pout[i*BIN_COUNT+k];
+                }
+                if( fold) pin[N] = pout[N]; // carry the partial status sum forward
+                MPI_Reduce(pin, pout, total, MPI_LONG,
+                    MPI_SUM, 0, comm_mod_reduce);
+            }
+        }
+        MPI_Bcast( pout, total, MPI_LONG, 0, comm);
     }
 
-    MPI_Reduce(in, out, num_superacc*exblas::BIN_COUNT, MPI_LONG, MPI_SUM, 0,
-        comm_mod);
-    int rank;
-    MPI_Comm_rank( comm_mod, &rank);
-    if(rank == 0)
+    if( fold)
     {
-        int size;
-        MPI_Comm_size( comm_mod_reduce, &size);
-        if( size > 1)
-        {
-            for( unsigned i=0; i<num_superacc; i++)
-            {
-                int imin=exblas::IMIN, imax=exblas::IMAX;
-                cpu::Normalize(&out[i*exblas::BIN_COUNT], imin, imax);
-                for( int k=0; k<exblas::BIN_COUNT; k++)
-                    in[i*BIN_COUNT+k] = out[i*BIN_COUNT+k];
-            }
-            MPI_Reduce(in, out, num_superacc*exblas::BIN_COUNT, MPI_LONG,
-                MPI_SUM, 0, comm_mod_reduce);
-        }
+        std::copy( aug_out.begin(), aug_out.begin()+N, out);
+        *status = static_cast<int>( aug_out[N]);
     }
-    MPI_Bcast( out, num_superacc*exblas::BIN_COUNT, MPI_LONG, 0, comm);
 }
 
 }//namespace exblas

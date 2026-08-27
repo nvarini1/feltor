@@ -96,6 +96,7 @@ set(DG_HEADERS
   ode.h
   pcg.h
   pcg_merged.h
+  pcg_castep.h
   poisson.h
   refined_elliptic.h
   runge_kutta.h
@@ -191,6 +192,7 @@ set(DG_TESTS
   nullstelle_t.cpp
   pcg_t.cpp
   pcg_merged_t.cpp
+  pcg_castep_t.cpp
   poisson_t.cpp
   runge_kutta_t.cpp
   simpsons_t.cpp
@@ -243,6 +245,7 @@ list( APPEND DG_MPI_TESTS
     poisson_t.cpp
     bicgstabl_t.cpp
     pcg_merged_t.cpp
+    pcg_castep_t.cpp
     blas_t.cpp
     blas1_t.cpp
 )
@@ -351,6 +354,15 @@ endif()
 option( FELTOR_DG_USE_PCG_MERGED "Use dg::PCGmerged (single-reduction CG) in MultigridCG2d." OFF)
 if( FELTOR_DG_USE_PCG_MERGED)
     target_compile_definitions( dg_dg INTERFACE DG_USE_PCG_MERGED)
+endif()
+
+# Use the s-step / communication-avoiding PCG (dg::PCGcastep) inside
+# MultigridCG2d elliptic solves: one MPI_Allreduce per s iterations (s-fold
+# fewer synchronizations). Sweep the block size at runtime via env DG_CASTEP_S.
+# Usage: cmake -DFELTOR_DG_USE_PCG_CASTEP=ON ...  (takes precedence over MERGED)
+option( FELTOR_DG_USE_PCG_CASTEP "Use dg::PCGcastep (s-step CA-CG) in MultigridCG2d." OFF)
+if( FELTOR_DG_USE_PCG_CASTEP)
+    target_compile_definitions( dg_dg INTERFACE DG_USE_PCG_CASTEP)
 endif()
 # NVSHMEM support: enables the production NVSHMEM halo-exchange path in symv.
 # Requires NVSHMEM_HOME to be set in the environment.

@@ -48,6 +48,26 @@
             }
         },
         {
+            "name": "mpi-gpu-merged",
+            "displayName": "Multi core MPI with GPU + single-reduction CG (benchmark)",
+            "binaryDir": "build/mpi-gpu-merged",
+            "inherits": "mpi-gpu",
+            "cacheVariables": {
+                "FELTOR_DG_USE_PCG_MERGED": "ON",
+                "FELTOR_WITH_NVTX": "ON"
+            }
+        },
+        {
+            "name": "mpi-gpu-castep",
+            "displayName": "Multi core MPI with GPU + s-step CA-CG (benchmark)",
+            "binaryDir": "build/mpi-gpu-castep",
+            "inherits": "mpi-gpu",
+            "cacheVariables": {
+                "FELTOR_DG_USE_PCG_CASTEP": "ON",
+                "FELTOR_WITH_NVTX": "ON"
+            }
+        },
+        {
             "name": "mpi-omp",
             "displayName": "Multi core MPI with OpenMP",
             "binaryDir": "build/mpi-omp",

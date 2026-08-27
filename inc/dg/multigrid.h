@@ -7,6 +7,7 @@
 #include "blas.h"
 #include "pcg.h"
 #include "pcg_merged.h"
+#include "pcg_castep.h"
 #include "chebyshev.h"
 #include "eve.h"
 #include "backend/timer.h"
@@ -691,9 +692,15 @@ struct MultigridCG2d
 
   private:
     dg::NestedGrids<Geometry, Matrix, Container> m_nested;
-    // Build with -DDG_USE_PCG_MERGED (CMake: FELTOR_DG_USE_PCG_MERGED=ON) to
-    // use the single-reduction Chronopoulos-Gear solver in the elliptic solves.
-#ifdef DG_USE_PCG_MERGED
+    // Solver used in the elliptic solves (all three are drop-in compatible):
+    //  -DDG_USE_PCG_CASTEP (CMake: FELTOR_DG_USE_PCG_CASTEP=ON) -> s-step CA-CG,
+    //     one MPI_Allreduce per s iterations (sweep s at runtime via DG_CASTEP_S).
+    //  -DDG_USE_PCG_MERGED (CMake: FELTOR_DG_USE_PCG_MERGED=ON) -> single-reduction
+    //     Chronopoulos-Gear, one MPI_Allreduce per iteration.
+    //  (default) -> standard dg::PCG, two MPI_Allreduce per iteration.
+#if defined(DG_USE_PCG_CASTEP)
+    std::vector< PCGcastep<Container> > m_pcg;
+#elif defined(DG_USE_PCG_MERGED)
     std::vector< PCGmerged<Container> > m_pcg;
 #else
     std::vector< PCG<Container> > m_pcg;

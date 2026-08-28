@@ -4,6 +4,7 @@
 #include <cmath>
 #include <array>
 #include <vector>
+#include <iostream>     // std::cerr (un-gated failure diagnostics)
 #include <tuple>
 #include <cstdlib>       // std::getenv, std::atoi
 #include <type_traits>
@@ -187,7 +188,18 @@ PCGcastep<ContainerType>::fused_dots(
     }
 #endif
     if( status != 0 && m_throw_on_fail)
+    {   // un-gated: a NaN/Inf here usually means the *fields* already blew up
+        // (physics divergence feeding the solve), not a solver breakdown --
+        // distinguishes "CA-CG broke" from "simulation blew up" post-mortem.
+        int nr_rank = 0;
+#ifdef MPI_VERSION
+        MPI_Comm_rank( MPI_COMM_WORLD, &nr_rank);
+#endif
+        std::cerr << "# PCGcastep NaN/Inf in reduction rank="<<nr_rank
+            << " (K="<<K<<" inner products) -- input to solve is non-finite"
+            << std::endl;
         throw dg::Error( Message(_ping_) << "PCGcastep: NaN/Inf in reduction");
+    }
     return res;
 }
 
@@ -310,6 +322,20 @@ unsigned PCGcastep< ContainerType>::solve(
             value_type delta = quad( G, Mb, pc, Bp);   // <phat, Ahat phat>_W
             if( !(delta > 0) || !std::isfinite(rr_old) )
             {   // basis breakdown -> reconstruct progress so far and restart block
+                // Un-gated (every rank): the whole point of this diagnostic is to
+                // catch the *victim* rank whose monomial basis lost definiteness --
+                // DG_RANK0 gating is exactly why prior cluster runs "printed
+                // nothing" before the pmix -25 cascade. G[Mb-1][Mb-1] is the
+                // largest Gram entry (~lambda_max^{2s}); if it is huge the
+                // monomial basis is the culprit (needs scaling), not physics.
+                int brk_rank = 0;
+#ifdef MPI_VERSION
+                MPI_Comm_rank( MPI_COMM_WORLD, &brk_rank);
+#endif
+                std::cerr << "# PCGcastep BREAKDOWN rank="<<brk_rank<<" s="<<sblk
+                    <<" inner_j="<<j<<" iter="<<iter<<" delta="<<delta
+                    <<" rr_old="<<rr_old<<" Gmax="<<G[(size_t)(Mb-1)*Mb+(Mb-1)]
+                    <<std::endl;
                 break;
             }
             value_type alpha = rr_old/delta;
@@ -344,7 +370,15 @@ unsigned PCGcastep< ContainerType>::solve(
             }
         }
         if( iter == iter_before)   // immediate breakdown, no progress -> give up
-            break;                 // (handled by throw/return below)
+        {                          // (handled by throw/return below)
+            int gu_rank = 0;
+#ifdef MPI_VERSION
+            MPI_Comm_rank( MPI_COMM_WORLD, &gu_rank);
+#endif
+            std::cerr << "# PCGcastep STALL (0 progress in block) rank="<<gu_rank
+                << " s="<<sblk<<" iter="<<iter<<" -> giving up"<<std::endl;
+            break;
+        }
     }
 
     // x = x0 + L .* dxhat
